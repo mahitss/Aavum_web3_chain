@@ -1,0 +1,17 @@
+.env
+.env.local
+**/.env
+!**/.env.example
+
+node_modules/
+frontend/.next/
+frontend/out/
+
+agent-worker/target/
+
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+
+.DS_Store
+*.log
