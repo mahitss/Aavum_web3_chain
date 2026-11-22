@@ -1,0 +1,47 @@
+services:
+  agent-worker:
+    build:
+      context: ./agent-worker
+    ports:
+      - "8080:8080"
+    environment:
+      WORKER_PRIVATE_KEY: ${WORKER_PRIVATE_KEY}
+      NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
+      PORT: 8080
+    restart: unless-stopped
+
+  agent-orchestrator:
+    build:
+      context: ./agent-orchestrator
+    ports:
+      - "8081:8081"
+    environment:
+      AEVUM_RPC_URL: ${AEVUM_RPC_URL:-https://rpc-test.qday.info}
+      AEVUM_CHAIN_ID: ${AEVUM_CHAIN_ID:-44005}
+      TUSD8_ADDRESS: ${TUSD8_ADDRESS:-0x456569838f1d43009A91ebA4263147Afd7233483}
+      NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
+      PRINCIPAL_ADDRESS: ${PRINCIPAL_ADDRESS}
+      ORCHESTRATOR_AGENT_PRIVATE_KEY: ${ORCHESTRATOR_AGENT_PRIVATE_KEY}
+      WORKER_URL: http://agent-worker:8080
+      ORCHESTRATOR_PORT: 8081
+      PER_TASK_LIMIT: ${PER_TASK_LIMIT:-1000000}
+      HOURLY_LIMIT: ${HOURLY_LIMIT:-10000000}
+    depends_on:
+      - agent-worker
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
+        NEXT_PUBLIC_API_URL: http://localhost:8081
+        NEXT_PUBLIC_AEVUM_RPC_URL: ${AEVUM_RPC_URL:-https://rpc-test.qday.info}
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
+      NEXT_PUBLIC_API_URL: http://localhost:8081
+    depends_on:
+      - agent-orchestrator
+    restart: unless-stopped

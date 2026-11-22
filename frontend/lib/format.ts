@@ -1,24 +1,19 @@
-export function parseTusd(input: string): bigint {
-  const trimmed = input.trim();
-  if (!/^\d+(\.\d{0,6})?$/.test(trimmed)) {
-    throw new Error('Enter a tUSD8 amount with at most 6 decimals');
-  }
-  const [whole, frac = ''] = trimmed.split('.');
-  return BigInt(whole) * 1_000_000n + BigInt((frac + '000000').slice(0, 6));
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
 }
 
-export function formatTusd(units: bigint): string {
-  const negative = units < 0n;
-  const value = negative ? -units : units;
+export function tusd(units: bigint | number | string | undefined) {
+  if (units === undefined) return '—';
+  const value = typeof units === 'bigint' ? units : BigInt(units || 0);
   const whole = value / 1_000_000n;
   const frac = (value % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
-  const text = frac.length > 0 ? `${whole}.${frac}` : whole.toString();
-  return negative ? `-${text}` : text;
+  return frac ? `${whole}.${frac}` : whole.toString();
 }
 
-export function errorText(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message.split('\n')[0];
-  }
-  return 'request failed';
+export function shortHash(hash: string) {
+  if (!hash || hash.length < 12) return hash || '—';
+  return `${hash.slice(0, 8)}…${hash.slice(-4)}`;
 }
