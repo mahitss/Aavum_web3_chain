@@ -1,42 +1,18 @@
-use alloy::primitives::{keccak256, B256};
-use serde_json::{json, Value};
+use crate::protocol::{keccak256, ComputeRequest};
 
-/// Deterministic compute unit. The same payload always yields the same bytes.
-pub fn execute(payload: &[u8]) -> Vec<u8> {
-    let digest = keccak256(payload);
-    let value = json!({
+/// Deterministic micro-compute. The same request always yields the same result and hash.
+pub fn execute_task(request: &ComputeRequest) -> (String, [u8; 32]) {
+    let prompt_keccak = format!("0x{}", hex::encode(keccak256(request.prompt.as_bytes())));
+    let output = serde_json::json!({
         "protocol": "Nexus402-v1",
         "algorithm": "keccak256",
-        "inputKeccak": format!("{digest}"),
-        "bytes": payload.len(),
+        "task_type": request.task_type,
+        "prompt_keccak": prompt_keccak,
+        "prompt_bytes": request.prompt.len(),
     });
-    serde_json::to_vec(&value).expect("canonical result serializes")
-}
-
-pub fn result_hash(result: &[u8]) -> B256 {
-    keccak256(result)
-}
-
-pub fn result_value(result: &[u8]) -> Value {
-    serde_json::from_slice(result).unwrap_or_else(|_| json!({ "raw": hex_encode(result) }))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-/// Digest the worker signs: keccak256(abi.encodePacked(taskId, resultHash)).
-pub fn proof_digest(task_id: B256, result_hash: B256) -> B256 {
-    let mut raw = [0u8; 64];
-    raw[..32].copy_from_slice(task_id.as_slice());
-    raw[32..].copy_from_slice(result_hash.as_slice());
-    keccak256(raw)
+    let output = serde_json::to_string(&output).expect("compute result serializes");
+    let result_hash = keccak256(output.as_bytes());
+    (output, result_hash)
 }
 
 #[cfg(test)]
@@ -44,23 +20,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compute_is_stable() {
-        let payload = br#"{"job":"keccak256","n":1}"#;
-        assert_eq!(execute(payload), execute(payload));
-        let result = execute(payload);
-        let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
-        assert_eq!(parsed["protocol"], "Nexus402-v1");
-        assert_eq!(parsed["algorithm"], "keccak256");
-        assert_eq!(result_hash(&result), keccak256(&result));
-    }
-
-    #[test]
-    fn proof_digest_packs_task_and_result() {
-        let task = B256::from([0x11u8; 32]);
-        let result = B256::from([0x22u8; 32]);
-        let mut raw = [0u8; 64];
-        raw[..32].copy_from_slice(&[0x11u8; 32]);
-        raw[32..].copy_from_slice(&[0x22u8; 32]);
-        assert_eq!(proof_digest(task, result), keccak256(raw));
+    fn execute_task_is_stable() {
+        let request = ComputeRequest {
+            prompt: "Calculate compute hash".to_string(),
+            task_type: "hash".to_string(),
+        };
+        let (first, first_hash) = execute_task(&request);
+        let (second, second_hash) = execute_task(&request);
+        assert_eq!(first, second);
+        assert_eq!(first_hash, second_hash);
+        assert_eq!(first_hash, keccak256(first.as_bytes()));
+        assert!(first.contains("Nexus402-v1"));
+        assert!(first.contains("\"task_type\":\"hash\""));
     }
 }
