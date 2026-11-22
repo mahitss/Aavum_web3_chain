@@ -20,7 +20,7 @@ struct SessionConfig {
     bool isActive;
 }
 
-/// @notice Funds locked for one unit of agent work, settled in tUSD8.
+/// @notice Funds locked for one unit of agent work, settled in tUSD8 base units (1e6).
 struct TaskEscrow {
     bytes32 taskId;
     address principal;

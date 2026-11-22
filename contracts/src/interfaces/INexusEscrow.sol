@@ -14,16 +14,14 @@ interface INexusEscrow {
         uint256 expiresAt
     );
 
-    event SessionRevoked(address indexed principal, address indexed agentKey);
+    event SessionRevoked(address indexed principal, address indexed agentKey, string reason);
 
     event TaskEscrowLocked(
         bytes32 indexed taskId,
         address indexed principal,
-        address indexed agentKey,
-        address worker,
+        address indexed worker,
         uint256 amount,
-        uint256 deadline,
-        bytes32 taskHash
+        uint256 deadline
     );
 
     event TaskCompleted(
@@ -51,23 +49,23 @@ interface INexusEscrow {
         uint256 hourlyLimit,
         uint256 perTaskLimit,
         uint256 expiresAt,
-        uint256 nonce,
-        bytes calldata signature
+        uint8 v,
+        bytes32 r,
+        bytes32 s
     ) external;
 
-    /// @notice Pull `amount` tUSD8 from the session principal and lock it for `taskId`.
-    /// @dev Caller must be the authorized agent key. `deadline` is a block number.
+    /// @notice Pull `amount` tUSD8 from `principal` and lock it. Caller is the agent key.
+    /// @dev `durationBlocks` is added to the current block number to form the refund deadline.
     function lockTaskEscrow(
-        bytes32 taskId,
+        address principal,
         address worker,
         uint256 amount,
-        uint256 deadline,
+        uint256 durationBlocks,
         bytes32 taskHash
-    ) external;
+    ) external returns (bytes32 taskId);
 
-    /// @notice Release escrow to the worker after a proof signed by the worker key.
-    /// @dev The digest is keccak256(abi.encodePacked(taskId, resultHash)).
-    function completeTaskWithProof(bytes32 taskId, bytes32 resultHash, bytes calldata signature)
+    /// @notice Release escrow to the worker after an eth-signed proof from the worker key.
+    function completeTaskWithProof(bytes32 taskId, bytes32 resultHash, bytes calldata workerSignature)
         external;
 
     /// @notice Return the full escrow to the principal once `block.number` is past `deadline`.
@@ -82,10 +80,4 @@ interface INexusEscrow {
         returns (SessionConfig memory);
 
     function getTask(bytes32 taskId) external view returns (TaskEscrow memory);
-
-    function nonces(address principal) external view returns (uint256);
-
-    function agentPrincipal(address agentKey) external view returns (address);
-
-    function settlementToken() external view returns (address);
 }
