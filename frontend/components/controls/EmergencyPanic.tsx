@@ -38,7 +38,7 @@ export function EmergencyPanic({
         <div>
           <h2 className="text-lg">Emergency revoke</h2>
           <p className={cn('mt-1 font-mono text-sm', killed ? 'animate-pulse text-danger' : 'text-emerald-300')}>
-            {killed ? 'SESSION_KILLED' : 'OPERATIONAL'}
+            {killed ? 'SESSION_REVOKED' : 'OPERATIONAL'}
           </p>
         </div>
         <button

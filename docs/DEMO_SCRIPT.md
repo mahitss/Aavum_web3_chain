@@ -48,7 +48,7 @@ Read the left terminal as it fills:
 
 ## 2:15 – 2:45 | Circuit breaker
 
-[Back to the command center. Hit EMERGENCY REVOKE AGENT KEY. Confirm in the wallet. The status flashes SESSION_KILLED.]
+[Back to the command center. Hit EMERGENCY REVOKE AGENT KEY. Confirm in the wallet. The status flashes SESSION_REVOKED and Dispatch task is disabled.]
 
 "That transaction is the principal, not the agent. The key is dead on-chain."
 
@@ -72,6 +72,6 @@ Read the left terminal as it fills:
 | 1:30 | Typed-data signature, then OPERATIONAL |
 | 1:45 | Dual terminal through 402, lock, 200 |
 | 2:05 | Explorer receipts |
-| 2:15 | Red revoke button, then SESSION_KILLED |
+| 2:15 | Red revoke button, then SESSION_REVOKED |
 | 2:30 | Failed lock after revoke |
 | 2:45 | Explorer, both hashes, end |

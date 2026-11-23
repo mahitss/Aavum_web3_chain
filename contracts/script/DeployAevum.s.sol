@@ -20,5 +20,7 @@ contract DeployAevum is Script {
         console2.log("paymentToken", tusd8);
         console2.log("chainId", block.chainid);
         console2.log("rpc", "https://rpc-test.qday.info");
+        console2.log("domainSeparator");
+        console2.logBytes32(escrow.domainSeparator());
     }
 }

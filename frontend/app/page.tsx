@@ -84,6 +84,10 @@ export default function HomePage() {
 
   async function dispatch(event: FormEvent) {
     event.preventDefault();
+    if (killed) {
+      setNotice('Session revoked. New tasks are blocked until a new session is registered.');
+      return;
+    }
     setNotice('Dispatching to the orchestrator...');
     try {
       const response = await fetch(`${API_URL}/api/jobs`, {
@@ -168,7 +172,9 @@ export default function HomePage() {
                 className="mt-1 w-full rounded-lg border border-line bg-black/30 px-3 py-2 text-sm"
               />
             </label>
-            <button className="rounded-lg bg-white/10 px-4 py-2 text-sm">Dispatch task</button>
+            <button disabled={killed} className="rounded-lg bg-white/10 px-4 py-2 text-sm disabled:opacity-40">
+              Dispatch task
+            </button>
             <p className="w-full text-xs text-slate-400">{notice}</p>
           </form>
         </div>
