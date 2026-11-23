@@ -85,8 +85,11 @@ type computeResponse struct {
 	ClaimTxHash string `json:"claim_tx_hash"`
 }
 
+// Progress reports an intermediate job state while the handshake is still running.
+type Progress func(status string, taskID [32]byte, lockTx, amount string)
+
 // DispatchTask performs the 402 handshake, locks escrow, and retries with the task id.
-func DispatchTask(workerURL, prompt, taskType string, token common.Address, locker Locker, budget *Budget, logf func(string)) (*types.TaskJob, error) {
+func DispatchTask(workerURL, prompt, taskType string, token common.Address, locker Locker, budget *Budget, logf func(string), progress Progress) (*types.TaskJob, error) {
 	started := time.Now()
 	payload, err := json.Marshal(map[string]string{
 		"prompt":    prompt,
@@ -129,6 +132,9 @@ func DispatchTask(workerURL, prompt, taskType string, token common.Address, lock
 		return nil, err
 	}
 	released = true
+	if progress != nil {
+		progress("ESCROW_LOCKED", taskID, lockTx, challenge.Amount.String())
+	}
 	logf(fmt.Sprintf("[RETRY] POST /api/v1/compute (X-Escrow-TaskId=0x%x)", taskID))
 	headers := map[string]string{
 		"X-Escrow-TaskId": "0x" + hex.EncodeToString(taskID[:]),

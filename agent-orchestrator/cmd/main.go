@@ -204,7 +204,14 @@ func consume(jobs <-chan *types.TaskJob, state *hub, workerURL string, token com
 			finish(state, job, &types.TaskJob{Status: "FAILED", Result: "aevum client is not configured"})
 			continue
 		}
-		settled, err := x402.DispatchTask(workerURL, job.Prompt, job.TaskType, token, chain, budget, state.addLog)
+		settled, err := x402.DispatchTask(workerURL, job.Prompt, job.TaskType, token, chain, budget, state.addLog, func(status string, taskID [32]byte, lockTx, amount string) {
+			state.mu.Lock()
+			job.Status = status
+			job.TaskId = taskID
+			job.LockTxHash = lockTx
+			job.Amount = amount
+			state.mu.Unlock()
+		})
 		if err != nil {
 			if settled == nil {
 				settled = &types.TaskJob{Status: "FAILED", Result: err.Error()}
