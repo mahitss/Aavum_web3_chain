@@ -6,6 +6,6 @@ RUN cargo build --release
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/agent-worker /agent-worker
-ENV PORT=8080
+ENV WORKER_PORT=8080
 EXPOSE 8080
 ENTRYPOINT ["/agent-worker"]

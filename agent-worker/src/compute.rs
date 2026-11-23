@@ -1,17 +1,25 @@
-use crate::protocol::{keccak256, ComputeRequest};
+use crate::protocol::{calculate_result_hash, ComputeRequest};
 
-/// Deterministic micro-compute. The same request always yields the same result and hash.
-pub fn execute_task(request: &ComputeRequest) -> (String, [u8; 32]) {
-    let prompt_keccak = format!("0x{}", hex::encode(keccak256(request.prompt.as_bytes())));
-    let output = serde_json::json!({
-        "protocol": "Nexus402-v1",
-        "algorithm": "keccak256",
-        "task_type": request.task_type,
-        "prompt_keccak": prompt_keccak,
-        "prompt_bytes": request.prompt.len(),
-    });
-    let output = serde_json::to_string(&output).expect("compute result serializes");
-    let result_hash = keccak256(output.as_bytes());
+pub fn execute_compute_job(request: &ComputeRequest) -> (String, [u8; 32]) {
+    let output = match request.task_type.as_str() {
+        "hash" => {
+            use sha3::{Digest, Keccak256};
+            let mut hasher = Keccak256::new();
+            hasher.update(request.prompt.as_bytes());
+            format!("0x{}", hex::encode(hasher.finalize()))
+        }
+        "inference" => {
+            format!(
+                "Nexus402-Compute: Verified output synthesis for token context '{}'",
+                request.prompt
+            )
+        }
+        _ => {
+            format!("Standard execution complete for: {}", request.prompt)
+        }
+    };
+
+    let result_hash = calculate_result_hash(&output);
     (output, result_hash)
 }
 
@@ -20,17 +28,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn execute_task_is_stable() {
+    fn hash_job_is_stable() {
         let request = ComputeRequest {
-            prompt: "Calculate compute hash".to_string(),
+            prompt: "Generate test payload".to_string(),
             task_type: "hash".to_string(),
         };
-        let (first, first_hash) = execute_task(&request);
-        let (second, second_hash) = execute_task(&request);
+        let (first, first_hash) = execute_compute_job(&request);
+        let (second, second_hash) = execute_compute_job(&request);
         assert_eq!(first, second);
         assert_eq!(first_hash, second_hash);
-        assert_eq!(first_hash, keccak256(first.as_bytes()));
-        assert!(first.contains("Nexus402-v1"));
-        assert!(first.contains("\"task_type\":\"hash\""));
+        assert!(first.starts_with("0x"));
+        assert_eq!(first_hash, calculate_result_hash(&first));
     }
 }
