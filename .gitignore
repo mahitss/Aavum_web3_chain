@@ -7,7 +7,9 @@ node_modules/
 frontend/.next/
 frontend/out/
 
-agent-worker/target/
+agent-worker/target
+agent-orchestrator/orchestrator
+agent-orchestrator/orchestrator.exe
 
 contracts/out/
 contracts/cache/

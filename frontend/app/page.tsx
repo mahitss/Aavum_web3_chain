@@ -16,13 +16,29 @@ const MeshCanvas = dynamic(() => import('@/components/3d/MeshCanvas').then((mod)
 });
 
 type Telemetry = {
-  spent_in_window?: string;
-  hourly_limit?: string;
-  agent?: string;
+  agent_address?: string;
+  hourly_spent?: string | number;
+  hourly_limit?: string | number;
   connected?: boolean;
-  logs?: string[];
-  ledger?: { kind: string; tx_hash: string; amount?: string; status: string; block?: number }[];
 };
+
+type OrchestratorJob = {
+  id: string;
+  prompt?: string;
+  status?: string;
+  amount?: string | number;
+  task_hash?: string;
+  task_id?: string;
+  lock_tx_hash?: string;
+  claim_tx_hash?: string;
+  error?: string;
+};
+
+function asUnits(value: unknown): bigint {
+  if (typeof value === 'string' && value.length > 0) return BigInt(value);
+  if (typeof value === 'number' && Number.isFinite(value)) return BigInt(Math.trunc(value));
+  return 0n;
+}
 
 export default function HomePage() {
   const { isConnected } = useAccount();
@@ -32,6 +48,7 @@ export default function HomePage() {
   const [taskType, setTaskType] = useState('hash');
   const [notice, setNotice] = useState('');
   const [telemetry, setTelemetry] = useState<Telemetry>({});
+  const [jobs, setJobs] = useState<OrchestratorJob[]>([]);
   const [localLedger, setLocalLedger] = useState<LedgerRow[]>([]);
   const [pulse, setPulse] = useState(0);
 
@@ -50,10 +67,11 @@ export default function HomePage() {
         const response = await fetch(`${API_URL}/api/telemetry`);
         if (!response.ok) return;
         const body = (await response.json()) as Telemetry;
+        const jobsResponse = await fetch(`${API_URL}/api/jobs`);
+        const jobsBody = jobsResponse.ok ? ((await jobsResponse.json()) as OrchestratorJob[]) : [];
         if (stop) return;
-        setTelemetry(body);
-        const settled = (body.logs || []).some((line) => line.includes('200 OK'));
-        if (settled) setPulse((value) => (value === 0 ? 1 : value));
+        setTelemetry({ ...body, connected: true });
+        setJobs(Array.isArray(jobsBody) ? jobsBody : []);
       } catch {
         if (!stop) setTelemetry((current) => ({ ...current, connected: false }));
       }
@@ -66,18 +84,24 @@ export default function HomePage() {
     };
   }, []);
 
-  const ledger = useMemo<LedgerRow[]>(() => {
-    const remote = (telemetry.ledger || []).map((row) => ({
-      kind: row.kind,
-      txHash: row.tx_hash,
-      amount: row.amount,
-      status: row.status,
-      block: row.block,
-    }));
-    return [...localLedger, ...remote];
-  }, [localLedger, telemetry.ledger]);
+  const logs = useMemo(() => jobs.flatMap((job) => handshakeLines(job)), [jobs]);
 
-  const settledCount = (telemetry.logs || []).filter((line) => line.includes('200 OK')).length;
+  const ledger = useMemo<LedgerRow[]>(() => {
+    const remote = jobs.flatMap((job) => {
+      const amount = job.amount === undefined ? undefined : String(job.amount);
+      const rows: LedgerRow[] = [];
+      if (job.lock_tx_hash) {
+        rows.push({ kind: 'Escrow Lock', txHash: job.lock_tx_hash, amount, status: job.status || 'Locked' });
+      }
+      if (job.claim_tx_hash) {
+        rows.push({ kind: 'Proof Claim', txHash: job.claim_tx_hash, amount, status: 'Confirmed' });
+      }
+      return rows;
+    });
+    return [...localLedger, ...remote];
+  }, [localLedger, jobs]);
+
+  const settledCount = jobs.filter((job) => job.status === 'SETTLED').length;
   useEffect(() => {
     if (settledCount > 0) setPulse(settledCount);
   }, [settledCount]);
@@ -108,9 +132,7 @@ export default function HomePage() {
     if (kind === 'Session Grant') setKilled(false);
   }
 
-  const spent = telemetry.spent_in_window || '0';
-  const limit = telemetry.hourly_limit || '0';
-  const remaining = BigInt(limit || '0') - BigInt(spent || '0');
+  const remaining = asUnits(telemetry.hourly_limit) - asUnits(telemetry.hourly_spent);
 
   return (
     <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-6 px-4 py-6">
@@ -129,7 +151,7 @@ export default function HomePage() {
 
       <section className="grid gap-3 md:grid-cols-3">
         <Metric label="Remaining hourly allowance" value={`${tusd(remaining > 0n ? remaining : 0n)} tUSD8`} />
-        <Metric label="Active agent key" value={telemetry.agent || agentKey || '—'} mono />
+        <Metric label="Active agent key" value={telemetry.agent_address || agentKey || '—'} mono />
         <Metric label="Escrow contract TVL" value={`${tusd(escrowBalance.data)} tUSD8`} />
       </section>
 
@@ -178,10 +200,21 @@ export default function HomePage() {
             <p className="w-full text-xs text-slate-400">{notice}</p>
           </form>
         </div>
-        <DualTerminal logs={telemetry.logs || []} ledger={ledger} />
+        <DualTerminal logs={logs} ledger={ledger} />
       </section>
     </main>
   );
+}
+
+function handshakeLines(job: OrchestratorJob): string[] {
+  const lines = [`[REQ] ${job.prompt || job.id}`];
+  if (job.task_hash || job.status !== 'PENDING') {
+    lines.push(`[402 CHALLENGE] amount=${job.amount ?? '—'} hash=${job.task_hash || '—'}`);
+  }
+  if (job.lock_tx_hash) lines.push(`[ESCROW LOCK] ${job.lock_tx_hash}`);
+  if (job.status === 'SETTLED') lines.push(`[200 OK SETTLED] ${job.claim_tx_hash || job.task_id || ''}`);
+  if (job.status === 'FAILED') lines.push(`[FAIL] ${job.error || 'failed'}`);
+  return lines;
 }
 
 function Metric({ label, value, mono }: { label: string; value: string; mono?: boolean }) {

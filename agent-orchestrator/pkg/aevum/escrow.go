@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -17,137 +15,140 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-const lockABI = `[{"name":"lockTaskEscrow","type":"function","stateMutability":"nonpayable","inputs":[{"name":"principal","type":"address"},{"name":"worker","type":"address"},{"name":"amount","type":"uint256"},{"name":"durationBlocks","type":"uint256"},{"name":"taskHash","type":"bytes32"}],"outputs":[{"name":"taskId","type":"bytes32"}]}]`
+const EscrowABI = `[
+	{
+		"type": "function",
+		"name": "lockTaskEscrow",
+		"inputs": [
+			{"name": "principal", "type": "address"},
+			{"name": "worker", "type": "address"},
+			{"name": "amount", "type": "uint256"},
+			{"name": "durationBlocks", "type": "uint256"},
+			{"name": "taskHash", "type": "bytes32"}
+		],
+		"outputs": [{"name": "taskId", "type": "bytes32"}]
+	},
+	{
+		"type": "event",
+		"name": "TaskEscrowLocked",
+		"inputs": [
+			{"name": "taskId", "type": "bytes32", "indexed": true},
+			{"name": "principal", "type": "address", "indexed": true},
+			{"name": "worker", "type": "address", "indexed": true},
+			{"name": "amount", "type": "uint256", "indexed": false},
+			{"name": "deadline", "type": "uint256", "indexed": false}
+		]
+	}
+]`
 
-const lockedEvent = "TaskEscrowLocked(bytes32,address,address,uint256,uint256)"
-
-// Client signs lockTaskEscrow as the orchestrator agent key.
 type Client struct {
-	rpc       *ethclient.Client
-	key       *ecdsa.PrivateKey
-	chainID   *big.Int
-	escrow    common.Address
-	principal common.Address
-	parsed    abi.ABI
-	eventID   common.Hash
-
-	mu     sync.Mutex
-	blocks map[string]uint64
+	ec            *ethclient.Client
+	contractABI   abi.ABI
+	escrowAddress common.Address
+	privateKey    *ecdsa.PrivateKey
+	agentAddress  common.Address
+	principal     common.Address
+	chainID       *big.Int
 }
 
-func Dial(rpcURL string, chainID int64, privateKey string, escrow common.Address, principal common.Address) (*Client, error) {
-	rpc, err := ethclient.Dial(rpcURL)
+func NewClient(rpcURL string, privateKeyHex string, escrowAddrHex string, principalAddrHex string, chainID int64) (*Client, error) {
+	ec, err := ethclient.Dial(rpcURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to connect to RPC: %w", err)
 	}
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(privateKey, "0x"))
+
+	cleanKey := strings.TrimPrefix(privateKeyHex, "0x")
+	key, err := crypto.HexToECDSA(cleanKey)
 	if err != nil {
-		rpc.Close()
-		return nil, fmt.Errorf("ORCHESTRATOR_AGENT_PRIVATE_KEY: %w", err)
+		ec.Close()
+		return nil, fmt.Errorf("invalid private key: %w", err)
 	}
-	parsed, err := abi.JSON(strings.NewReader(lockABI))
+
+	parsedABI, err := abi.JSON(strings.NewReader(EscrowABI))
 	if err != nil {
-		rpc.Close()
-		return nil, err
+		ec.Close()
+		return nil, fmt.Errorf("failed to parse contract ABI: %w", err)
 	}
+
 	return &Client{
-		rpc:       rpc,
-		key:       key,
-		chainID:   big.NewInt(chainID),
-		escrow:    escrow,
-		principal: principal,
-		parsed:    parsed,
-		eventID:   crypto.Keccak256Hash([]byte(lockedEvent)),
-		blocks:    map[string]uint64{},
+		ec:            ec,
+		contractABI:   parsedABI,
+		escrowAddress: common.HexToAddress(escrowAddrHex),
+		privateKey:    key,
+		agentAddress:  crypto.PubkeyToAddress(key.PublicKey),
+		principal:     common.HexToAddress(principalAddrHex),
+		chainID:       big.NewInt(chainID),
 	}, nil
 }
 
-func (c *Client) Close() {
-	if c != nil && c.rpc != nil {
-		c.rpc.Close()
-	}
-}
-
 func (c *Client) AgentAddress() common.Address {
-	return crypto.PubkeyToAddress(c.key.PublicKey)
+	return c.agentAddress
 }
 
-func (c *Client) Connected(ctx context.Context) bool {
-	if c == nil || c.rpc == nil {
-		return false
-	}
-	_, err := c.rpc.ChainID(ctx)
-	return err == nil
+func (c *Client) PrincipalAddress() common.Address {
+	return c.principal
 }
 
-func (c *Client) Block(txHash string) uint64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.blocks[strings.ToLower(txHash)]
-}
-
-// LockEscrow broadcasts lockTaskEscrow and returns the task id from TaskEscrowLocked.
-func (c *Client) LockEscrow(worker common.Address, amount *big.Int, durationBlocks uint64, taskHash [32]byte) ([32]byte, string, error) {
+func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *big.Int, durationBlocks uint64, taskHash [32]byte) ([32]byte, string, error) {
 	var taskID [32]byte
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	inputData, err := c.contractABI.Pack(
+		"lockTaskEscrow",
+		c.principal,
+		worker,
+		amount,
+		new(big.Int).SetUint64(durationBlocks),
+		taskHash,
+	)
+	if err != nil {
+		return taskID, "", fmt.Errorf("failed to pack lockTaskEscrow calldata: %w", err)
+	}
 
-	data, err := c.parsed.Pack("lockTaskEscrow", c.principal, worker, amount, new(big.Int).SetUint64(durationBlocks), taskHash)
+	nonce, err := c.ec.PendingNonceAt(ctx, c.agentAddress)
 	if err != nil {
-		return taskID, "", err
+		return taskID, "", fmt.Errorf("failed to get pending nonce: %w", err)
 	}
-	from := c.AgentAddress()
-	nonce, err := c.rpc.PendingNonceAt(ctx, from)
+
+	gasPrice, err := c.ec.SuggestGasPrice(ctx)
+	if err != nil || gasPrice == nil || gasPrice.Sign() <= 0 {
+		gasPrice = big.NewInt(20_000_000_000)
+	}
+
+	tx := types.NewTransaction(nonce, c.escrowAddress, big.NewInt(0), 300_000, gasPrice, inputData)
+	signedTx, err := types.SignTx(tx, types.NewCancunSigner(c.chainID), c.privateKey)
 	if err != nil {
-		return taskID, "", err
+		return taskID, "", fmt.Errorf("failed to sign transaction: %w", err)
 	}
-	gasPrice, err := c.rpc.SuggestGasPrice(ctx)
-	if err != nil || gasPrice == nil || gasPrice.Sign() == 0 {
-		gasPrice = big.NewInt(1_000_000_000)
+
+	if err := c.ec.SendTransaction(ctx, signedTx); err != nil {
+		return taskID, signedTx.Hash().Hex(), fmt.Errorf("failed to broadcast transaction: %w", err)
 	}
-	to := c.escrow
-	tx := types.NewTx(&types.LegacyTx{
-		Nonce:    nonce,
-		GasPrice: gasPrice,
-		Gas:      300000,
-		To:       &to,
-		Value:    big.NewInt(0),
-		Data:     data,
-	})
-	signed, err := types.SignTx(tx, types.NewEIP155Signer(c.chainID), c.key)
+
+	txHash := signedTx.Hash().Hex()
+	receipt, err := bindWaitMined(ctx, c.ec, signedTx)
 	if err != nil {
-		return taskID, "", err
+		return taskID, txHash, fmt.Errorf("transaction confirmation failed: %w", err)
 	}
-	if err := c.rpc.SendTransaction(ctx, signed); err != nil {
-		return taskID, "", err
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return taskID, txHash, fmt.Errorf("transaction execution reverted on-chain: %s", txHash)
 	}
-	receipt, err := waitReceipt(ctx, c.rpc, signed.Hash())
-	if err != nil {
-		return taskID, signed.Hash().Hex(), err
+
+	eventTopic := c.contractABI.Events["TaskEscrowLocked"].ID
+	for _, log := range receipt.Logs {
+		if log.Address == c.escrowAddress && len(log.Topics) > 1 && log.Topics[0] == eventTopic {
+			copy(taskID[:], log.Topics[1].Bytes())
+			return taskID, txHash, nil
+		}
 	}
-	if receipt.Status == 0 {
-		return taskID, signed.Hash().Hex(), fmt.Errorf("lock reverted in block %d", receipt.BlockNumber.Uint64())
-	}
-	taskID, err = taskIDFromReceipt(receipt, c.eventID)
-	if err != nil {
-		return taskID, signed.Hash().Hex(), err
-	}
-	c.mu.Lock()
-	c.blocks[strings.ToLower(signed.Hash().Hex())] = receipt.BlockNumber.Uint64()
-	c.mu.Unlock()
-	return taskID, signed.Hash().Hex(), nil
+	return taskID, txHash, fmt.Errorf("TaskEscrowLocked event not found in receipt")
 }
 
-func waitReceipt(ctx context.Context, rpc *ethclient.Client, hash common.Hash) (*types.Receipt, error) {
-	ticker := time.NewTicker(2 * time.Second)
+func bindWaitMined(ctx context.Context, ec *ethclient.Client, tx *types.Transaction) (*types.Receipt, error) {
+	ticker := time.NewTicker(800 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		receipt, err := rpc.TransactionReceipt(ctx, hash)
-		if err == nil && receipt != nil {
+		receipt, err := ec.TransactionReceipt(ctx, tx.Hash())
+		if err == nil {
 			return receipt, nil
-		}
-		if err != nil && err != ethereum.NotFound {
-			return nil, err
 		}
 		select {
 		case <-ctx.Done():
@@ -155,16 +156,4 @@ func waitReceipt(ctx context.Context, rpc *ethclient.Client, hash common.Hash) (
 		case <-ticker.C:
 		}
 	}
-}
-
-func taskIDFromReceipt(receipt *types.Receipt, eventID common.Hash) ([32]byte, error) {
-	var taskID [32]byte
-	for _, entry := range receipt.Logs {
-		if len(entry.Topics) < 2 || entry.Topics[0] != eventID {
-			continue
-		}
-		copy(taskID[:], entry.Topics[1].Bytes())
-		return taskID, nil
-	}
-	return taskID, fmt.Errorf("TaskEscrowLocked log missing from receipt")
 }

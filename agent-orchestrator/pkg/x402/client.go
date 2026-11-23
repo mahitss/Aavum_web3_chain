@@ -9,253 +9,199 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/nexus402/agent-orchestrator/pkg/aevum"
 	"github.com/nexus402/agent-orchestrator/pkg/types"
 )
 
-const expectedProtocol = "Nexus402-v1"
+type Client struct {
+	httpClient  *http.Client
+	aevumClient *aevum.Client
+	workerURL   string
+	hourlyLimit *big.Int
+	perTaskCap  *big.Int
 
-// Locker submits the on-chain escrow lock for a 402 challenge.
-type Locker interface {
-	LockEscrow(worker common.Address, amount *big.Int, durationBlocks uint64, taskHash [32]byte) ([32]byte, string, error)
+	mu    sync.Mutex
+	spent *big.Int
 }
 
-// Budget is the orchestrator's local per-task and rolling hourly cap.
-type Budget struct {
-	mu          sync.Mutex
-	perTask     *big.Int
-	hourly      *big.Int
-	spent       *big.Int
-	windowStart time.Time
-}
-
-func NewBudget(perTask, hourly *big.Int) *Budget {
-	return &Budget{
-		perTask:     new(big.Int).Set(perTask),
-		hourly:      new(big.Int).Set(hourly),
+func NewClient(workerURL string, aevumClient *aevum.Client, perTaskCap *big.Int, hourlyLimit *big.Int) *Client {
+	return &Client{
+		httpClient:  &http.Client{Timeout: 2 * time.Minute},
+		aevumClient: aevumClient,
+		workerURL:   strings.TrimRight(workerURL, "/"),
+		hourlyLimit: new(big.Int).Set(hourlyLimit),
+		perTaskCap:  new(big.Int).Set(perTaskCap),
 		spent:       big.NewInt(0),
-		windowStart: time.Now(),
 	}
 }
 
-func (b *Budget) Reserve(amount *big.Int) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if time.Since(b.windowStart) >= time.Hour {
-		b.windowStart = time.Now()
-		b.spent = big.NewInt(0)
+func (c *Client) Spent() *big.Int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return new(big.Int).Set(c.spent)
+}
+
+func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
+	reqBody, err := json.Marshal(map[string]string{
+		"prompt":    job.Prompt,
+		"task_type": job.TaskType,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to serialize payload: %w", err)
 	}
-	if amount.Cmp(b.perTask) > 0 {
-		return fmt.Errorf("amount %s exceeds per-task limit %s", amount, b.perTask)
+
+	computeURL := c.workerURL + "/api/v1/compute"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, computeURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return err
 	}
-	next := new(big.Int).Add(b.spent, amount)
-	if next.Cmp(b.hourly) > 0 {
-		return fmt.Errorf("amount %s exceeds remaining hourly allowance", amount)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("initial request to worker failed: %w", err)
 	}
-	b.spent = next
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusPaymentRequired {
+		return fmt.Errorf("expected 402 Payment Required from worker, received: %d", resp.StatusCode)
+	}
+
+	job.Status = "402_CHALLENGED"
+	challenge, err := parsePaymentHeaders(resp.Header)
+	if err != nil {
+		return fmt.Errorf("invalid 402 challenge headers: %w", err)
+	}
+	job.Amount = challenge.Amount
+	job.TaskHash = "0x" + hex.EncodeToString(challenge.TaskHash[:])
+
+	if err := c.reserve(challenge.Amount); err != nil {
+		return err
+	}
+
+	taskID, lockTxHash, err := c.aevumClient.LockEscrow(ctx, challenge.Receiver, challenge.Amount, challenge.TimeoutBlocks, challenge.TaskHash)
+	if err != nil {
+		c.release(challenge.Amount)
+		if lockTxHash != "" {
+			job.LockTxHash = lockTxHash
+		}
+		return fmt.Errorf("on-chain escrow lock failed: %w", err)
+	}
+
+	job.Status = "ESCROW_LOCKED"
+	job.TaskId = "0x" + hex.EncodeToString(taskID[:])
+	job.LockTxHash = lockTxHash
+
+	retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, computeURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	retryReq.Header.Set("Content-Type", "application/json")
+	retryReq.Header.Set("X-Escrow-TaskId", job.TaskId)
+	retryReq.Header.Set("X-Escrow-TxHash", job.LockTxHash)
+
+	retryResp, err := c.httpClient.Do(retryReq)
+	if err != nil {
+		return fmt.Errorf("second request with escrow proof failed: %w", err)
+	}
+	defer retryResp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(io.LimitReader(retryResp.Body, 1<<20))
+	if retryResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("compute execution failed with status %d: %s", retryResp.StatusCode, string(bodyBytes))
+	}
+
+	var computeResp struct {
+		Status      string `json:"status"`
+		Result      string `json:"result"`
+		ClaimTxHash string `json:"claim_tx_hash"`
+	}
+	if err := json.Unmarshal(bodyBytes, &computeResp); err != nil {
+		return fmt.Errorf("invalid compute response: %w", err)
+	}
+
+	job.Status = "SETTLED"
+	job.Result = computeResp.Result
+	job.ClaimTxHash = computeResp.ClaimTxHash
+	job.SettledAt = time.Now()
 	return nil
 }
 
-func (b *Budget) Release(amount *big.Int) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.spent.Sub(b.spent, amount)
-	if b.spent.Sign() < 0 {
-		b.spent = big.NewInt(0)
+func (c *Client) reserve(amount *big.Int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if amount.Cmp(c.perTaskCap) > 0 {
+		return fmt.Errorf("requested fee %s exceeds local per-task cap %s", amount.String(), c.perTaskCap.String())
+	}
+	next := new(big.Int).Add(c.spent, amount)
+	if next.Cmp(c.hourlyLimit) > 0 {
+		return fmt.Errorf("requested fee %s exceeds remaining hourly allowance", amount.String())
+	}
+	c.spent = next
+	return nil
+}
+
+func (c *Client) release(amount *big.Int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.spent.Sub(c.spent, amount)
+	if c.spent.Sign() < 0 {
+		c.spent = big.NewInt(0)
 	}
 }
 
-func (b *Budget) Snapshot() (spent, hourly *big.Int) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if time.Since(b.windowStart) >= time.Hour {
-		return big.NewInt(0), new(big.Int).Set(b.hourly)
+func parsePaymentHeaders(h http.Header) (*types.PaymentChallenge, error) {
+	proto := h.Get("X-Payment-Protocol")
+	if proto != "Nexus402-v1" {
+		return nil, fmt.Errorf("unsupported protocol: %s", proto)
 	}
-	return new(big.Int).Set(b.spent), new(big.Int).Set(b.hourly)
-}
 
-type computeResponse struct {
-	Status      string `json:"status"`
-	Result      string `json:"result"`
-	TaskID      string `json:"task_id"`
-	ClaimTxHash string `json:"claim_tx_hash"`
-}
+	tokenHex := h.Get("X-Payment-Token")
+	if !common.IsHexAddress(tokenHex) {
+		return nil, fmt.Errorf("invalid payment token: %s", tokenHex)
+	}
 
-// Progress reports an intermediate job state while the handshake is still running.
-type Progress func(status string, taskID [32]byte, lockTx, amount string)
+	amountStr := h.Get("X-Payment-Amount")
+	amount, ok := new(big.Int).SetString(amountStr, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid payment amount: %s", amountStr)
+	}
 
-// DispatchTask performs the 402 handshake, locks escrow, and retries with the task id.
-func DispatchTask(workerURL, prompt, taskType string, token common.Address, locker Locker, budget *Budget, logf func(string), progress Progress) (*types.TaskJob, error) {
-	started := time.Now()
-	payload, err := json.Marshal(map[string]string{
-		"prompt":    prompt,
-		"task_type": taskType,
-	})
-	if err != nil {
-		return nil, err
+	receiverHex := h.Get("X-Payment-Receiver")
+	if !common.IsHexAddress(receiverHex) {
+		return nil, fmt.Errorf("invalid receiver address: %s", receiverHex)
 	}
-	endpoint := strings.TrimRight(workerURL, "/") + "/api/v1/compute"
-	logf("[REQ] POST /api/v1/compute (No Escrow Header)")
 
-	response, body, err := post(endpoint, payload, nil)
-	if err != nil {
-		return nil, err
+	taskHashHex := strings.TrimPrefix(h.Get("X-Task-Hash"), "0x")
+	decoded, err := hex.DecodeString(taskHashHex)
+	if err != nil || len(decoded) != 32 {
+		return nil, fmt.Errorf("invalid task hash header")
 	}
-	if response.StatusCode != http.StatusPaymentRequired {
-		return nil, fmt.Errorf("expected HTTP 402, got %d: %s", response.StatusCode, truncate(body))
-	}
-	challenge, err := ParseChallenge(response.Header, token)
-	if err != nil {
-		return nil, err
-	}
-	logf(fmt.Sprintf("[402] CHALLENGE: Amount=%s | TaskHash=0x%x", challenge.Amount.String(), challenge.TaskHash))
-	if err := budget.Reserve(challenge.Amount); err != nil {
-		return nil, err
-	}
-	released := false
-	defer func() {
-		if !released {
-			budget.Release(challenge.Amount)
+	var taskHash [32]byte
+	copy(taskHash[:], decoded)
+
+	timeout := uint64(50)
+	if timeoutStr := h.Get("X-Task-Timeout-Blocks"); timeoutStr != "" {
+		parsed, err := strconv.ParseUint(timeoutStr, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid timeout blocks")
 		}
-	}()
+		timeout = parsed
+	}
 
-	logf("[TX] Locking escrow on Aevum Testnet...")
-	taskID, lockTx, err := locker.LockEscrow(challenge.Receiver, challenge.Amount, challenge.TimeoutBlocks, challenge.TaskHash)
-	if err != nil {
-		if lockTx != "" {
-			return failedJob(prompt, taskType, started, lockTx, err), err
-		}
-		return nil, err
-	}
-	released = true
-	if progress != nil {
-		progress("ESCROW_LOCKED", taskID, lockTx, challenge.Amount.String())
-	}
-	logf(fmt.Sprintf("[RETRY] POST /api/v1/compute (X-Escrow-TaskId=0x%x)", taskID))
-	headers := map[string]string{
-		"X-Escrow-TaskId": "0x" + hex.EncodeToString(taskID[:]),
-		"X-Escrow-TxHash": lockTx,
-	}
-	paid, paidBody, err := post(endpoint, payload, headers)
-	if err != nil {
-		return failedJob(prompt, taskType, started, lockTx, err), err
-	}
-	if paid.StatusCode != http.StatusOK {
-		err = fmt.Errorf("worker rejected paid retry with %d: %s", paid.StatusCode, truncate(paidBody))
-		return failedJob(prompt, taskType, started, lockTx, err), err
-	}
-	var computed computeResponse
-	if err := json.Unmarshal(paidBody, &computed); err != nil {
-		return failedJob(prompt, taskType, started, lockTx, err), err
-	}
-	released = true
-	logf("[PROOF] Worker verified on-chain. Released payout. 200 OK.")
-	return &types.TaskJob{
-		Prompt:      prompt,
-		TaskType:    taskType,
-		Status:      "SETTLED",
-		TaskId:      taskID,
-		LockTxHash:  lockTx,
-		ClaimTxHash: computed.ClaimTxHash,
-		Result:      computed.Result,
-		Timestamp:   started.Unix(),
-		LatencyMs:   time.Since(started).Milliseconds(),
-		Amount:      challenge.Amount.String(),
+	return &types.PaymentChallenge{
+		Protocol:      proto,
+		Token:         common.HexToAddress(tokenHex),
+		Amount:        amount,
+		Receiver:      common.HexToAddress(receiverHex),
+		TaskHash:      taskHash,
+		TimeoutBlocks: timeout,
 	}, nil
-}
-
-func failedJob(prompt, taskType string, started time.Time, lockTx string, cause error) *types.TaskJob {
-	return &types.TaskJob{
-		Prompt:     prompt,
-		TaskType:   taskType,
-		Status:     "FAILED",
-		LockTxHash: lockTx,
-		Result:     cause.Error(),
-		Timestamp:  started.Unix(),
-		LatencyMs:  time.Since(started).Milliseconds(),
-	}
-}
-
-// ParseChallenge reads the Nexus402 payment headers.
-func ParseChallenge(header http.Header, expectedToken common.Address) (types.PaymentChallenge, error) {
-	var challenge types.PaymentChallenge
-	challenge.Protocol = header.Get("X-Payment-Protocol")
-	if challenge.Protocol != expectedProtocol {
-		return challenge, fmt.Errorf("unexpected protocol %q", challenge.Protocol)
-	}
-	token := common.HexToAddress(header.Get("X-Payment-Token"))
-	if token != expectedToken {
-		return challenge, fmt.Errorf("unexpected payment token %s", token.Hex())
-	}
-	challenge.Token = token
-	amount, ok := new(big.Int).SetString(strings.TrimSpace(header.Get("X-Payment-Amount")), 10)
-	if !ok || amount.Sign() <= 0 {
-		return challenge, fmt.Errorf("invalid payment amount")
-	}
-	challenge.Amount = amount
-	receiver := common.HexToAddress(header.Get("X-Payment-Receiver"))
-	if receiver == (common.Address{}) {
-		return challenge, fmt.Errorf("invalid payment receiver")
-	}
-	challenge.Receiver = receiver
-	hashBytes, err := decode32(header.Get("X-Task-Hash"))
-	if err != nil {
-		return challenge, fmt.Errorf("task hash: %w", err)
-	}
-	challenge.TaskHash = hashBytes
-	challenge.TimeoutBlocks = 50
-	if raw := strings.TrimSpace(header.Get("X-Task-Timeout-Blocks")); raw != "" {
-		timeout, ok := new(big.Int).SetString(raw, 10)
-		if !ok {
-			return challenge, fmt.Errorf("invalid timeout blocks")
-		}
-		challenge.TimeoutBlocks = timeout.Uint64()
-	}
-	return challenge, nil
-}
-
-func post(url string, payload []byte, headers map[string]string) (*http.Response, []byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return nil, nil, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	for key, value := range headers {
-		request.Header.Set(key, value)
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	return response, body, err
-}
-
-func decode32(value string) ([32]byte, error) {
-	var out [32]byte
-	raw := strings.TrimPrefix(strings.TrimSpace(value), "0x")
-	decoded, err := hex.DecodeString(raw)
-	if err != nil {
-		return out, err
-	}
-	if len(decoded) != 32 {
-		return out, fmt.Errorf("want 32 bytes, got %d", len(decoded))
-	}
-	copy(out[:], decoded)
-	return out, nil
-}
-
-func truncate(body []byte) string {
-	text := strings.TrimSpace(string(body))
-	if len(text) > 240 {
-		return text[:240]
-	}
-	return text
 }
