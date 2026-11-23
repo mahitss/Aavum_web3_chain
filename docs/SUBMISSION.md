@@ -1,72 +1,64 @@
-# DoraHacks submission — Nexus402
+# DoraHacks Submission Payload: Nexus402
 
-Copy the fields below into the DoraHacks form. The elevator pitch is the 100-word text. Do not replace the escrow row with a made-up address.
+Copy sections 1 through 6 into the form. Three fields are still tokens because this checkout has no broadcast and no recording. Fill those from the asset check at the bottom. Do not invent an address or a transaction hash.
 
-## Project name
+## 1. Project Information
 
-Nexus402
+- **Project Name:** Nexus402
+- **Tagline:** Autonomous Agent-to-Agent Micro-Service Mesh & Conditional Escrow Protocol on QDay Aevum Testnet
+- **Track:** Aevum Builder Challenge #1 (Stablecoin Payment Applications)
+- **Primary Category:** Agentic Payments / Infrastructure / Smart Contracts
 
-## Elevator pitch
+## 2. Project Description
 
-Nexus402 is an autonomous agent-to-agent micro-service mesh and conditional escrow protocol built on the QDay Aevum Testnet. Combining the native HTTP 402 Payment Required standard with EIP-712 scoped session keys, Nexus402 enables AI agents to discover, negotiate, hire, and settle micro-services using tUSD8 with zero human intervention. Featuring rolling hourly velocity caps, proof-of-compute settlement, and an on-chain emergency circuit breaker, Nexus402 provides the foundational financial rails for machine-to-machine commerce.
+Nexus402 is an autonomous machine-to-machine (M2M) payment network that enables AI agents to discover, negotiate, hire, and settle micro-services using `tUSD8` stablecoins on the QDay Aevum Testnet.
 
-## Tracks and categories
+Existing blockchain payment interfaces are engineered for humans clicking "Approve" on browser wallets. When developers give autonomous agents raw wallet access, they expose users to runaway spend loops and prompt-injection theft. Nexus402 eliminates both problems by combining the web-native HTTP 402 Payment Required standard with scoped on-chain escrow contracts and EIP-712 session keys.
 
-- Agentic Payments
-- Stablecoin Infrastructure
-- EVM Smart Contracts
+### Core Workflow:
 
-## Verifiable testnet deployments
+1. **HTTP 402 Handshake:** A client agent queries an API endpoint. The worker service responds with standard HTTP 402 headers detailing the price in tUSD8, recipient wallet, and cryptographic task commitment hash.
+2. **Autonomous Escrow Lock:** The client's ephemeral session key locks funds in `NexusEscrow.sol` on Aevum Testnet within strict hourly spend limits.
+3. **Cryptographic Proof Settlement:** The worker executes the compute, produces a result hash, signs it with its ECDSA key, and submits it on-chain to atomically unlock payout.
+4. **Emergency Circuit Breaker:** Human principals retain sovereignty with instant on-chain revocation and timelocked refund guarantees.
 
-| Field | Value |
-| --- | --- |
-| Network | QDay Aevum Testnet |
-| Chain ID | `44005` |
-| RPC | https://rpc-test.qday.info |
-| Explorer | https://explorer-test.qday.info |
-| tUSD8 | `0x456569838f1d43009A91ebA4263147Afd7233483` (ERC-20, 6 decimals) |
-| NexusEscrow | Not broadcast from this workspace. `PRIVATE_KEY` is unset, so there is no deployed address and no Blockscout verification to link yet. |
+## 3. Technology Stack & Systems Architecture
 
-After a tQDAY-funded deployer is exported as `PRIVATE_KEY`:
+- **Smart Contracts:** Solidity ^0.8.24, Foundry, OpenZeppelin v5.0 (EIP-712, ReentrancyGuard, SafeERC20).
+- **Worker Compute Node:** Rust 1.78+, Axum, Tokio, Alloy-rs (v0.1), Tower-HTTP.
+- **Orchestrator Node:** Go 1.22, go-ethereum (ethclient), Gin, Goroutine worker pools.
+- **Command Center & UI:** Next.js 14 (App Router), Three.js / React Three Fiber, Wagmi v2, Viem, RainbowKit, Tailwind CSS.
 
-```bash
-cd contracts
-forge script script/DeployAevum.s.sol:DeployAevum \
-  --rpc-url https://rpc-test.qday.info \
-  --broadcast \
-  --legacy \
-  -vvvv
-```
+## 4. Verifiable Testnet Artifacts
 
-The script logs the escrow address and the EIP-712 domain separator. Paste that address into `.env` as `NEXUS_ESCROW_ADDRESS` and into `frontend/.env.local` as `NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS`. Verify with:
+- **Target Network:** QDay Aevum Testnet
+- **Chain ID:** 44005
+- **RPC URL:** https://rpc-test.qday.info
+- **Explorer:** https://explorer-test.qday.info
+- **Settlement Stablecoin (tUSD8):** `0x456569838f1d43009A91ebA4263147Afd7233483`
+- **Deployed NexusEscrow Contract:** `<INSERT_DEPLOYED_CONTRACT_ADDRESS>`
+- **Sample Lock Transaction:** `<INSERT_EXPLORER_TX_LINK>`
+- **Sample Claim Transaction:** `<INSERT_EXPLORER_TX_LINK>`
 
-```bash
-forge verify-contract <DEPLOYED_NEXUS_ESCROW_ADDRESS> src/NexusEscrow.sol:NexusEscrow \
-  --chain-id 44005 \
-  --verifier-url https://explorer-test.qday.info/api \
-  --verifier blockscout \
-  --constructor-args $(cast abi-encode "constructor(address)" 0x456569838f1d43009A91ebA4263147Afd7233483)
-```
+## 5. Security & Risk Controls
 
-The three receipt links the form should cite, once that run exists, are `registerSessionWithSig`, `TaskEscrowLocked`, and `TaskCompleted` on `https://explorer-test.qday.info/tx/...`. `scripts/verify-e2e.sh` prints the lock and claim URLs. `scripts/mesh-bench.sh` prints the same pair for five tasks and then checks that task 6 reverts with `SessionInactive`.
+- **Least-Privilege Session Keys:** Ephemeral keys only have authority to deposit into escrow; they can never transfer or withdraw principal funds.
+- **Velocity Spend Limits:** On-chain rolling 1-hour window tracking ensures an agent cannot exceed pre-authorized spend caps even if compromised.
+- **Replay Protection:** Domain-separated EIP-712 signatures tied to Aevum's Chain ID (44005) with sequential per-principal nonces.
+- **Timelocked Refunds:** 100% principal refund path if a worker node fails to submit execution proof before the block deadline.
+- **Instant Revocation:** One-click on-chain circuit breaker immediately invalidates active session keys.
 
-Repository: https://github.com/mahitss/Aavum_web3_chain
+## 6. Open Source Deliverables
 
-## Key highlights against the rubric
+- **GitHub Repository:** https://github.com/mahitss/Aavum_web3_chain
+- **Docker Compose:** Run the entire system locally via `docker compose up --build`.
+- **Demo Video:** `<INSERT_YOUTUBE_OR_LOOM_LINK>`
 
-**Agentic mechanics.** The Go orchestrator posts compute with no payment header. The Rust worker answers `402` with `X-Payment-Protocol: Nexus402-v1`, the tUSD8 address, amount `250000`, the worker address, `keccak256` of the body, and a 50-block timeout. The orchestrator locks that quote, retries with `X-Escrow-TaskId`, and the worker claims. No wallet popup sits on that loop.
+## Asset check
 
-**Systems-grade engineering.** The orchestrator is Go 1.22 (Gin, go-ethereum, four goroutines on one job channel). The worker is Rust (Axum, Tokio, Alloy). The escrow is Solidity 0.8.24 on Cancun, tested with Foundry against OpenZeppelin Contracts v5.0.2. `forge test -vvv` covers the eight session, cap, proof, refund, and revoke cases.
+Checked in this workspace before the form is pasted:
 
-**Zero-trust financial safety.** `perTaskLimit` caps one lock. `hourlyLimit` caps `spentInWindow` inside `block.timestamp / 3600`, then the counter resets on the next window id. `deadline = block.number + durationBlocks` makes `refundExpiredTask` return the full amount to the principal. `emergencyRevokeSession` is the principal's transaction. It clears `isActive`, and the cockpit shows `SESSION_REVOKED` and stops new local dispatches.
-
-**3D command center.** The Next.js 14 cockpit connects to Aevum with RainbowKit and Wagmi v2, signs `SessionAuthorization`, and renders the orchestrator, the worker, and the escrow as a Three.js scene. Settlement pulses travel the edges. The split terminal shows the 402 dialogue on the left and explorer-linked receipts on the right.
-
-## Packet in this repo
-
-| Doc | Use |
-| --- | --- |
-| [README.md](../README.md) | Setup, deployment command, honest address status |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | State machine, 402 sequence, EIP-712, velocity window, proof |
-| [SECURITY_AUDIT.md](SECURITY_AUDIT.md) | Four threat vectors and the Foundry tests that cover them |
-| [DEMO_SCRIPT.md](DEMO_SCRIPT.md) | Three-minute recording shot list |
+1. `contracts/broadcast/` has no deployment artifact. `DeployAevum` has not been broadcast, because `PRIVATE_KEY` is not set. Leave `<INSERT_DEPLOYED_CONTRACT_ADDRESS>` until the script logs an address, then paste that address here and into `NEXUS_ESCROW_ADDRESS` / `NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS`.
+2. `scripts/mesh-bench.sh` has not produced lock or claim hashes. Leave both `<INSERT_EXPLORER_TX_LINK>` tokens until the bench prints `TaskEscrowLocked` and `TaskCompleted` explorer URLs.
+3. The recording from `docs/DEMO_SCRIPT.md` is not uploaded. Leave `<INSERT_YOUTUBE_OR_LOOM_LINK>` until the 3:30 cut is public.
+4. Source on `main`: https://github.com/mahitss/Aavum_web3_chain
