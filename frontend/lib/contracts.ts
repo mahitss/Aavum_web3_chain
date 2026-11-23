@@ -1,11 +1,15 @@
-import { isAddress } from 'viem';
+import { isAddress, zeroAddress } from 'viem';
 
 export const TUSD8_ADDRESS = '0x456569838f1d43009A91ebA4263147Afd7233483' as const;
 
 const configured = process.env.NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS ?? '';
-export const NEXUS_ESCROW_ADDRESS = isAddress(configured) ? configured : undefined;
+export const NEXUS_ESCROW_ADDRESS =
+  isAddress(configured) && configured.toLowerCase() !== zeroAddress ? configured : undefined;
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8081';
+export const API_URL =
+  process.env.NEXT_PUBLIC_ORCHESTRATOR_API_URL ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  'http://localhost:8081';
 
 export const nexusEscrowAbi = [
   {
@@ -73,6 +77,56 @@ export const nexusEscrowAbi = [
     inputs: [{ name: 'principal', type: 'address' }],
     outputs: [{ name: '', type: 'uint256' }],
   },
+  {
+    type: 'event',
+    name: 'SessionAuthorized',
+    inputs: [
+      { name: 'principal', type: 'address', indexed: true },
+      { name: 'agentKey', type: 'address', indexed: true },
+      { name: 'hourlyLimit', type: 'uint256', indexed: false },
+      { name: 'perTaskLimit', type: 'uint256', indexed: false },
+      { name: 'expiresAt', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'SessionRevoked',
+    inputs: [
+      { name: 'principal', type: 'address', indexed: true },
+      { name: 'agentKey', type: 'address', indexed: true },
+      { name: 'reason', type: 'string', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'TaskEscrowLocked',
+    inputs: [
+      { name: 'taskId', type: 'bytes32', indexed: true },
+      { name: 'principal', type: 'address', indexed: true },
+      { name: 'worker', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+      { name: 'deadline', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'TaskCompleted',
+    inputs: [
+      { name: 'taskId', type: 'bytes32', indexed: true },
+      { name: 'worker', type: 'address', indexed: true },
+      { name: 'resultHash', type: 'bytes32', indexed: false },
+      { name: 'amount', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'TaskRefunded',
+    inputs: [
+      { name: 'taskId', type: 'bytes32', indexed: true },
+      { name: 'principal', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+    ],
+  },
 ] as const;
 
 export const erc20Abi = [
@@ -102,5 +156,12 @@ export const erc20Abi = [
     stateMutability: 'view',
     inputs: [{ name: 'account', type: 'address' }],
     outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'decimals',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
   },
 ] as const;

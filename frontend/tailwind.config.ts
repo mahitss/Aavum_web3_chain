@@ -6,16 +6,16 @@ const config: Config = {
     extend: {
       fontFamily: {
         sans: ['var(--font-sans)', 'sans-serif'],
-        mono: ['var(--font-mono)', 'ui-monospace', 'monospace'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'monospace'],
       },
       colors: {
-        ink: '#090b10',
-        panel: '#10151c',
+        canvas: '#05070a',
+        card: '#0c1017',
+        emerald: '#10b981',
+        cyan: '#06b6d4',
+        amber: '#f59e0b',
+        panic: '#ef4444',
         line: '#243140',
-        signal: '#3ee0c5',
-        worker: '#e7b549',
-        orch: '#7aa2ff',
-        danger: '#ff3b4e',
       },
     },
   },

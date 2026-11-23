@@ -37,12 +37,14 @@ services:
       args:
         NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
         NEXT_PUBLIC_API_URL: http://localhost:8081
+        NEXT_PUBLIC_ORCHESTRATOR_API_URL: http://localhost:8081
         NEXT_PUBLIC_AEVUM_RPC_URL: ${AEVUM_RPC_URL:-https://rpc-test.qday.info}
     ports:
       - "3000:3000"
     environment:
       NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
       NEXT_PUBLIC_API_URL: http://localhost:8081
+      NEXT_PUBLIC_ORCHESTRATOR_API_URL: http://localhost:8081
     depends_on:
       - agent-orchestrator
     restart: unless-stopped

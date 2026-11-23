@@ -1,9 +1,9 @@
 'use client';
 
+import { Copy } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { explorerTx } from '@/config/chains';
 import { shortHash, tusd } from '@/lib/format';
-
-export type HandshakeLog = string;
 
 export type LedgerRow = {
   kind: string;
@@ -13,32 +13,51 @@ export type LedgerRow = {
   block?: number;
 };
 
-export function DualTerminal({
-  logs,
-  ledger,
-}: {
-  logs: HandshakeLog[];
-  ledger: LedgerRow[];
-}) {
+export function DualTerminal({ logs, ledger }: { logs: string[]; ledger: LedgerRow[] }) {
+  const stream = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState<'stream' | 'ledger' | null>(null);
+
+  useEffect(() => {
+    const node = stream.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [logs]);
+
+  async function copy(target: 'stream' | 'ledger') {
+    const text =
+      target === 'stream'
+        ? logs.join('\n')
+        : ledger.map((row) => [row.kind, row.block ?? '', row.txHash, row.amount ?? '', row.status].join('\t')).join('\n');
+    await navigator.clipboard.writeText(text);
+    setCopied(target);
+    window.setTimeout(() => setCopied(null), 1200);
+  }
+
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
+    <div className="grid gap-4">
       <section className="term rounded-2xl border border-line p-4">
-        <header className="mb-3 text-xs uppercase tracking-[0.18em] text-signal">
-          Autonomous HTTP 402 handshake stream
+        <header className="mb-3 flex items-center justify-between text-xs uppercase tracking-[0.18em] text-emerald">
+          <span>Autonomous HTTP 402 handshake stream</span>
+          <button type="button" onClick={() => copy('stream')} className="inline-flex items-center gap-1 text-slate-400">
+            <Copy size={12} /> {copied === 'stream' ? 'Copied' : 'Copy'}
+          </button>
         </header>
-        <pre className="h-72 overflow-auto font-mono text-xs leading-5 text-slate-300">
-          {logs.length ? logs.join('\n') : 'Waiting for orchestrator telemetry...'}
+        <pre ref={stream} className="h-72 overflow-auto font-mono text-xs leading-5 text-slate-300">
+          {logs.length ? logs.join('\n') : 'Waiting for orchestrator jobs...'}
         </pre>
       </section>
       <section className="term rounded-2xl border border-line p-4">
-        <header className="mb-3 text-xs uppercase tracking-[0.18em] text-worker">
-          Verifiable Aevum Testnet ledger
+        <header className="mb-3 flex items-center justify-between text-xs uppercase tracking-[0.18em] text-amber">
+          <span>Verifiable Aevum Testnet ledger</span>
+          <button type="button" onClick={() => copy('ledger')} className="inline-flex items-center gap-1 text-slate-400">
+            <Copy size={12} /> {copied === 'ledger' ? 'Copied' : 'Copy'}
+          </button>
         </header>
         <div className="h-72 overflow-auto">
           <table className="w-full text-left font-mono text-xs">
             <thead className="text-slate-500">
               <tr>
-                <th className="pb-2">Event</th>
+                <th className="pb-2">Action</th>
                 <th>Block</th>
                 <th>Tx</th>
                 <th>Amount</th>
@@ -51,7 +70,7 @@ export function DualTerminal({
                   <td className="py-2 pr-2">{row.kind}</td>
                   <td>{row.block || '—'}</td>
                   <td>
-                    <a className="text-signal underline-offset-2 hover:underline" href={explorerTx(row.txHash)} target="_blank" rel="noreferrer">
+                    <a className="text-cyan underline-offset-2 hover:underline" href={explorerTx(row.txHash)} target="_blank" rel="noreferrer">
                       {shortHash(row.txHash)}
                     </a>
                   </td>

@@ -5,6 +5,7 @@
 
 node_modules/
 frontend/.next/
+frontend/tsconfig.tsbuildinfo
 frontend/out/
 
 agent-worker/target
