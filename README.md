@@ -156,7 +156,7 @@ Before the first paid task, from the connected principal wallet:
 2. Sign `SessionAuthorization` and submit `registerSessionWithSig` for the orchestrator agent address.
 3. Keep the session key and the worker key funded with tQDAY. They pay gas. They do not custody tUSD8.
 
-Then `POST http://127.0.0.1:8081/api/jobs` with `{"prompt":"...","task_type":"hash"}`, or use **Dispatch task** on the dashboard. `scripts/e2e-demo.sh` checks the unpaid 402, dispatches a job, and prints the lock and claim hashes once the job is `SETTLED`.
+Then `POST http://127.0.0.1:8081/api/jobs` with `{"prompt":"...","task_type":"hash"}`, or use **Dispatch task** on the dashboard. `scripts/verify-e2e.sh` checks the unpaid 402, dispatches a job, and prints the lock and claim hashes once the job is `SETTLED`. `scripts/mesh-bench.sh` repeats that path for five tasks, then sends `emergencyRevokeSession` and expects task 6 to revert with `SessionInactive`.
 
 ## E2E testnet transactions
 
@@ -173,8 +173,8 @@ These three receipts are the submission evidence. They are produced by a funded 
 - [x] Public GitHub repository: https://github.com/mahitss/Aavum_web3_chain
 - [ ] Frontend deployed on Vercel and pointed at Aevum. Local build is `npm run build` in `frontend/`.
 - [x] Contracts compile and `forge test` is green. Source verification on the explorer waits on the broadcast above.
-- [x] This README and `docs/DEMO_SCRIPT.md`.
+- [x] This README, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md), [docs/SUBMISSION.md](docs/SUBMISSION.md), and [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md).
 - [ ] 3-minute demo recorded from `docs/DEMO_SCRIPT.md` and linked on DoraHacks.
 - [x] Tracked files ignore `.env`. No private keys are committed. `contracts/broadcast/` is gitignored.
 
-The demo script is [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md).
+The form text is [docs/SUBMISSION.md](docs/SUBMISSION.md). The demo script is [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md).
