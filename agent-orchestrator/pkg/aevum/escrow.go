@@ -3,6 +3,7 @@ package aevum
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -127,7 +128,7 @@ func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *
 	}
 
 	if err := c.ec.SendTransaction(ctx, signedTx); err != nil {
-		return taskID, signedTx.Hash().Hex(), fmt.Errorf("failed to broadcast transaction: %w", err)
+		return taskID, signedTx.Hash().Hex(), c.revertError(ctx, inputData, err)
 	}
 
 	txHash := signedTx.Hash().Hex()
@@ -136,7 +137,7 @@ func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *
 		return taskID, txHash, fmt.Errorf("transaction confirmation failed: %w", err)
 	}
 	if receipt.Status != types.ReceiptStatusSuccessful {
-		return taskID, txHash, fmt.Errorf("transaction execution reverted on-chain: %s", txHash)
+		return taskID, txHash, c.revertError(ctx, inputData, fmt.Errorf("transaction execution reverted on-chain: %s", txHash))
 	}
 
 	eventTopic := c.contractABI.Events["TaskEscrowLocked"].ID
@@ -147,6 +148,30 @@ func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *
 		}
 	}
 	return taskID, txHash, fmt.Errorf("TaskEscrowLocked event not found in receipt")
+}
+
+func (c *Client) revertError(ctx context.Context, data []byte, fallback error) error {
+	msg := ethereum.CallMsg{From: c.agentAddress, To: &c.escrowAddress, Data: data, Gas: 300_000}
+	_, callErr := c.ec.CallContract(ctx, msg, nil)
+	text := fallback.Error()
+	if callErr != nil {
+		text = callErr.Error() + " " + text
+	}
+	if name := namedCustomError(text); name != "" {
+		return fmt.Errorf("%s: %w", name, fallback)
+	}
+	return fallback
+}
+
+func namedCustomError(text string) string {
+	lower := strings.ToLower(text)
+	for _, name := range []string{"ExceedsHourlyLimit", "SessionInactive", "ExceedsPerTaskLimit", "SessionExpired"} {
+		selector := hex.EncodeToString(crypto.Keccak256([]byte(name + "()"))[:4])
+		if strings.Contains(lower, strings.ToLower(name)) || strings.Contains(lower, selector) {
+			return name
+		}
+	}
+	return ""
 }
 
 func bindWaitMined(ctx context.Context, ec *ethclient.Client, tx *types.Transaction) (*types.Receipt, error) {

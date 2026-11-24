@@ -9,7 +9,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use blockchain::BlockchainClient;
-use protocol::*;
+use protocol::{
+    calculate_task_hash, decode_header, encode_header, resolve_service, service_price,
+    ComputeRequest, ComputeResponse, PaymentRequired, PaymentRequiredError, PaymentResponseHeader,
+    PaymentSignature, DEFAULT_RPC_URL, DEFAULT_TUSD8_ADDRESS, EXPLORER_TX_PREFIX, PAYMENT_REQUIRED,
+    PAYMENT_RESPONSE, PAYMENT_SIGNATURE, PROTOCOL_VERSION, TASK_TIMEOUT_BLOCKS, X_ESCROW_TASK_ID,
+    X_ESCROW_TASK_ID_LEGACY, X_PAYMENT_AMOUNT, X_PAYMENT_PROTOCOL, X_PAYMENT_RECEIVER,
+    X_PAYMENT_TOKEN, X_TASK_HASH, X_TASK_TIMEOUT_BLOCKS,
+};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,6 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             X_PAYMENT_RECEIVER.clone(),
             X_TASK_HASH.clone(),
             X_TASK_TIMEOUT_BLOCKS.clone(),
+            PAYMENT_REQUIRED.clone(),
+            PAYMENT_RESPONSE.clone(),
             axum::http::HeaderName::from_static("x-request-id"),
         ]);
 
@@ -194,14 +203,35 @@ async fn compute_handler(
     headers: HeaderMap,
     Json(payload): Json<ComputeRequest>,
 ) -> Response {
+    let service = match resolve_service(&payload) {
+        Ok(service) => service,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err })),
+            )
+                .into_response();
+        }
+    };
+    let price = service_price(service);
     let task_hash = calculate_task_hash(&payload);
     let task_hash_hex = format!("0x{}", hex::encode(task_hash));
 
-    let escrow_task_id = headers
-        .get(X_ESCROW_TASK_ID.clone())
-        .or_else(|| headers.get(X_ESCROW_TASK_ID_LEGACY.clone()))
+    let signed = headers
+        .get(PAYMENT_SIGNATURE.clone())
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().trim_start_matches("0x"))
+        .and_then(|value| decode_header::<PaymentSignature>(value).ok());
+    let escrow_task_id = signed
+        .as_ref()
+        .map(|payment| payment.task_id.clone())
+        .or_else(|| {
+            headers
+                .get(X_ESCROW_TASK_ID.clone())
+                .or_else(|| headers.get(X_ESCROW_TASK_ID_LEGACY.clone()))
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        })
+        .map(|value| value.trim().trim_start_matches("0x").to_string())
         .filter(|value| !value.is_empty());
 
     let Some(task_id_hex) = escrow_task_id else {
@@ -212,7 +242,7 @@ async fn compute_handler(
             error: "Payment Required".to_string(),
             message: "Compute requires conditional tUSD8 micro-escrow lock on Aevum Testnet"
                 .to_string(),
-            required_amount: TASK_PRICE_UNITS,
+            required_amount: price,
             token: DEFAULT_TUSD8_ADDRESS.to_string(),
             task_hash: task_hash_hex.clone(),
         };
@@ -226,10 +256,19 @@ async fn compute_handler(
             X_PAYMENT_TOKEN.clone(),
             DEFAULT_TUSD8_ADDRESS.parse().unwrap(),
         );
-        response_headers.insert(
-            X_PAYMENT_AMOUNT.clone(),
-            TASK_PRICE_UNITS.to_string().parse().unwrap(),
-        );
+        response_headers.insert(X_PAYMENT_AMOUNT.clone(), price.to_string().parse().unwrap());
+        let challenge = PaymentRequired {
+            scheme: "nexus-escrow-v1".to_string(),
+            network: "eip155:44005".to_string(),
+            asset: DEFAULT_TUSD8_ADDRESS.to_string(),
+            amount: price.to_string(),
+            pay_to: state.blockchain.worker_address().to_string(),
+            task_hash: task_hash_hex.clone(),
+            timeout_blocks: TASK_TIMEOUT_BLOCKS,
+        };
+        if let Ok(value) = encode_header(&challenge).parse() {
+            response_headers.insert(PAYMENT_REQUIRED.clone(), value);
+        }
         response_headers.insert(
             X_PAYMENT_RECEIVER.clone(),
             state
@@ -247,7 +286,7 @@ async fn compute_handler(
         return response;
     };
 
-    let task_id_bytes = match BlockchainClient::parse_task_id(task_id_hex) {
+    let task_id_bytes = match BlockchainClient::parse_task_id(&task_id_hex) {
         Ok(bytes) => bytes,
         Err(err) => {
             return (
@@ -282,7 +321,7 @@ async fn compute_handler(
     info!("Validating on-chain escrow lock for taskId: 0x{task_id_hex}");
     if let Err(err) = state
         .blockchain
-        .verify_escrow(task_id_bytes, task_hash)
+        .verify_escrow(task_id_bytes, task_hash, price)
         .await
     {
         error!("Escrow verification failed: {err}");
@@ -297,7 +336,19 @@ async fn compute_handler(
     }
 
     info!("Escrow confirmed on Aevum Testnet. Running compute...");
-    let (output, result_hash) = compute::execute_compute_job(&payload);
+    let (output, result_hash) = match compute::execute_service(&payload, &state.blockchain).await {
+        Ok(result) => result,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "compute service failed before claim",
+                    "details": err
+                })),
+            )
+                .into_response();
+        }
+    };
     let result_hash_hex = format!("0x{}", hex::encode(result_hash));
 
     info!("Submitting cryptographic execution proof to NexusEscrow...");
@@ -326,8 +377,20 @@ async fn compute_handler(
         result: output,
         task_id: format!("0x{task_id_hex}"),
         task_hash: task_hash_hex,
-        result_hash: result_hash_hex,
-        claim_tx_hash: claim_tx,
+        result_hash: result_hash_hex.clone(),
+        claim_tx_hash: claim_tx.clone(),
     };
-    (StatusCode::OK, Json(response)).into_response()
+    let mut response = (StatusCode::OK, Json(response)).into_response();
+    let settled = PaymentResponseHeader {
+        status: "settled".to_string(),
+        claim_tx_hash: claim_tx.clone(),
+        result_hash: result_hash_hex.clone(),
+        explorer_url: format!("{EXPLORER_TX_PREFIX}{claim_tx}"),
+    };
+    if let Ok(value) = encode_header(&settled).parse() {
+        response
+            .headers_mut()
+            .insert(PAYMENT_RESPONSE.clone(), value);
+    }
+    response
 }

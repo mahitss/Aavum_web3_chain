@@ -3,6 +3,7 @@ package x402
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -49,10 +50,11 @@ func (c *Client) Spent() *big.Int {
 }
 
 func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
-	reqBody, err := json.Marshal(map[string]string{
-		"prompt":    job.Prompt,
-		"task_type": job.TaskType,
-	})
+	service := canonicalService(job)
+	reqBody, err := json.Marshal(struct {
+		Prompt  string `json:"prompt"`
+		Service string `json:"service"`
+	}{Prompt: job.Prompt, Service: service})
 	if err != nil {
 		return fmt.Errorf("failed to serialize payload: %w", err)
 	}
@@ -84,13 +86,19 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	job.Amount = challenge.Amount
 	job.TaskHash = "0x" + hex.EncodeToString(challenge.TaskHash[:])
 
-	if err := c.reserve(challenge.Amount); err != nil {
-		return err
+	reserved := false
+	if !job.BypassLocalCap {
+		if err := c.reserve(challenge.Amount); err != nil {
+			return err
+		}
+		reserved = true
 	}
 
 	taskID, lockTxHash, err := c.aevumClient.LockEscrow(ctx, challenge.Receiver, challenge.Amount, challenge.TimeoutBlocks, challenge.TaskHash)
 	if err != nil {
-		c.release(challenge.Amount)
+		if reserved {
+			c.release(challenge.Amount)
+		}
 		if lockTxHash != "" {
 			job.LockTxHash = lockTxHash
 		}
@@ -109,6 +117,16 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	retryReq.Header.Set("Content-Type", "application/json")
 	retryReq.Header.Set("X-Escrow-TaskId", job.TaskId)
 	retryReq.Header.Set("X-Escrow-TxHash", job.LockTxHash)
+	signature, err := json.Marshal(map[string]string{
+		"taskId":     job.TaskId,
+		"lockTxHash": job.LockTxHash,
+		"agentKey":   c.aevumClient.AgentAddress().Hex(),
+		"principal":  c.aevumClient.PrincipalAddress().Hex(),
+	})
+	if err != nil {
+		return err
+	}
+	retryReq.Header.Set("PAYMENT-SIGNATURE", base64.StdEncoding.EncodeToString(signature))
 
 	retryResp, err := c.httpClient.Do(retryReq)
 	if err != nil {
@@ -124,6 +142,7 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	var computeResp struct {
 		Status      string `json:"status"`
 		Result      string `json:"result"`
+		ResultHash  string `json:"result_hash"`
 		ClaimTxHash string `json:"claim_tx_hash"`
 	}
 	if err := json.Unmarshal(bodyBytes, &computeResp); err != nil {
@@ -132,6 +151,7 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 
 	job.Status = "SETTLED"
 	job.Result = computeResp.Result
+	job.ResultHash = computeResp.ResultHash
 	job.ClaimTxHash = computeResp.ClaimTxHash
 	job.SettledAt = time.Now()
 	c.notify(job)
@@ -167,7 +187,23 @@ func (c *Client) release(amount *big.Int) {
 	}
 }
 
+func canonicalService(job *types.TaskJob) string {
+	raw := job.Service
+	if raw == "" {
+		raw = job.TaskType
+	}
+	switch raw {
+	case "web_brief", "chain_audit", "ai_synthesis":
+		return raw
+	default:
+		return "ai_synthesis"
+	}
+}
+
 func parsePaymentHeaders(h http.Header) (*types.PaymentChallenge, error) {
+	if encoded := h.Get("PAYMENT-REQUIRED"); encoded != "" {
+		return parsePaymentRequired(encoded)
+	}
 	proto := h.Get("X-Payment-Protocol")
 	if proto != "Nexus402-v1" {
 		return nil, fmt.Errorf("unsupported protocol: %s", proto)
@@ -211,6 +247,52 @@ func parsePaymentHeaders(h http.Header) (*types.PaymentChallenge, error) {
 		Token:         common.HexToAddress(tokenHex),
 		Amount:        amount,
 		Receiver:      common.HexToAddress(receiverHex),
+		TaskHash:      taskHash,
+		TimeoutBlocks: timeout,
+	}, nil
+}
+
+func parsePaymentRequired(encoded string) (*types.PaymentChallenge, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT-REQUIRED encoding: %w", err)
+	}
+	var challenge struct {
+		Scheme        string `json:"scheme"`
+		Asset         string `json:"asset"`
+		Amount        string `json:"amount"`
+		PayTo         string `json:"payTo"`
+		TaskHash      string `json:"taskHash"`
+		TimeoutBlocks uint64 `json:"timeoutBlocks"`
+	}
+	if err := json.Unmarshal(raw, &challenge); err != nil {
+		return nil, fmt.Errorf("invalid PAYMENT-REQUIRED body: %w", err)
+	}
+	if challenge.Scheme != "nexus-escrow-v1" {
+		return nil, fmt.Errorf("unsupported scheme: %s", challenge.Scheme)
+	}
+	if !common.IsHexAddress(challenge.Asset) || !common.IsHexAddress(challenge.PayTo) {
+		return nil, fmt.Errorf("invalid payment address")
+	}
+	amount, ok := new(big.Int).SetString(challenge.Amount, 10)
+	if !ok {
+		return nil, fmt.Errorf("invalid payment amount")
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(challenge.TaskHash, "0x"))
+	if err != nil || len(decoded) != 32 {
+		return nil, fmt.Errorf("invalid task hash")
+	}
+	var taskHash [32]byte
+	copy(taskHash[:], decoded)
+	timeout := challenge.TimeoutBlocks
+	if timeout == 0 {
+		timeout = 50
+	}
+	return &types.PaymentChallenge{
+		Protocol:      challenge.Scheme,
+		Token:         common.HexToAddress(challenge.Asset),
+		Amount:        amount,
+		Receiver:      common.HexToAddress(challenge.PayTo),
 		TaskHash:      taskHash,
 		TimeoutBlocks: timeout,
 	}, nil

@@ -5,7 +5,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { isAddress, isHex, type Address, type Hex } from 'viem';
 import { useAccount, useReadContract, useSwitchChain, useWriteContract } from 'wagmi';
-import { aevumTestnet } from '@/config/chains';
+import { aevumTestnet, explorerTx } from '@/config/chains';
 import { MeshBoundary } from '@/components/3d/MeshBoundary';
 import { EmergencyPanic } from '@/components/controls/EmergencyPanic';
 import { SessionDelegator } from '@/components/controls/SessionDelegator';
@@ -27,8 +27,11 @@ type OrchestratorJob = {
   id: string;
   prompt?: string;
   status?: string;
+  service?: string;
   amount?: string | number;
   task_hash?: string;
+  result?: string;
+  result_hash?: string;
   task_id?: string;
   lock_tx_hash?: string;
   claim_tx_hash?: string;
@@ -55,8 +58,8 @@ export default function HomePage() {
   const refundWrite = useWriteContract();
   const [agentKey, setAgentKey] = useState('');
   const [killed, setKilled] = useState(false);
-  const [prompt, setPrompt] = useState('Calculate compute hash');
-  const [taskType, setTaskType] = useState('hash');
+  const [prompt, setPrompt] = useState('Explain why a capped session key is safer than an unlimited token approval.');
+  const [service, setService] = useState('ai_synthesis');
   const [notice, setNotice] = useState('');
   const [audit, setAudit] = useState<string[]>([]);
   const [telemetry, setTelemetry] = useState<Telemetry>({});
@@ -170,11 +173,14 @@ export default function HomePage() {
   }, [localLedger, jobs]);
 
   const settledCount = jobs.filter((job) => job.status === 'SETTLED').length;
+  const capEnforced = jobs.some((job) => job.status === 'BLOCKED_HOURLY_CAP');
+  const latestOutput = [...jobs].reverse().find((job) => job.result) || null;
   const refundable = jobs.find((job) => job.task_id && isHex(job.task_id) && job.status !== 'SETTLED');
   const expiresAt = session.data ? Number(session.data[3]) : 0;
   const ttl = expiresAt > now ? formatTtl(expiresAt - now) : '—';
   const spent = asUnits(telemetry.hourly_spent);
   const limit = asUnits(telemetry.hourly_limit);
+  const spendRatio = capEnforced ? 100 : limit > 0n ? Number((spent * 100n) / limit) : 0;
   const sessionActive = Boolean(session.data?.[6]);
   const nextStep = !isConnected
     ? 'Connect the principal wallet. It must be on QDay Aevum, chain 44005.'
@@ -201,10 +207,25 @@ export default function HomePage() {
       const response = await fetch(`${API_URL}/api/jobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, task_type: taskType }),
+        body: JSON.stringify({ prompt, task_type: service, service }),
       });
       const body = await response.json();
       setNotice(response.ok ? `Queued ${body.id}` : body.error || 'Dispatch failed');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Orchestrator unreachable');
+    }
+  }
+
+  async function runScenario(scenario: 'happy_path' | 'velocity_attack' | 'kill_switch_test') {
+    setNotice(`Starting ${scenario}...`);
+    try {
+      const response = await fetch(`${API_URL}/api/scenarios/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scenario }),
+      });
+      const body = await response.json();
+      setNotice(response.ok ? `Scenario ${scenario} accepted` : body.error || 'Scenario failed');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Orchestrator unreachable');
     }
@@ -252,14 +273,14 @@ export default function HomePage() {
 
       {isConnected && chainId !== aevumTestnet.id ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber/40 bg-card px-4 py-3" role="alert">
-          <p className="text-sm">This wallet is not on QDay Aevum Testnet (44005).</p>
+          <p className="text-sm">Switch to QDay Aevum Testnet #44005 before signing or paying.</p>
           <button
             type="button"
             className="rounded-lg bg-emerald px-3 py-2 text-sm font-medium text-black"
             disabled={switchingChain}
             onClick={() => switchChain({ chainId: aevumTestnet.id })}
           >
-            {switchingChain ? 'Switching' : 'Switch to Aevum Testnet'}
+            {switchingChain ? 'Switching' : 'Switch to QDay Aevum Testnet #44005'}
           </button>
         </div>
       ) : null}
@@ -298,8 +319,12 @@ export default function HomePage() {
               <input value={prompt} onChange={(event) => setPrompt(event.target.value)} className="mt-1 w-full rounded-lg border border-line bg-black/30 px-3 py-2 text-sm" />
             </label>
             <label className="block text-sm">
-              Task type
-              <input value={taskType} onChange={(event) => setTaskType(event.target.value)} className="mt-1 w-full rounded-lg border border-line bg-black/30 px-3 py-2 text-sm" />
+              Service
+              <select value={service} onChange={(event) => setService(event.target.value)} className="mt-1 w-full rounded-lg border border-line bg-black/30 px-3 py-2 text-sm">
+                <option value="web_brief">web_brief · 0.15 tUSD8</option>
+                <option value="ai_synthesis">ai_synthesis · 0.25 tUSD8</option>
+                <option value="chain_audit">chain_audit · 0.50 tUSD8</option>
+              </select>
             </label>
             <div className="flex flex-wrap gap-2">
               <button disabled={killed} className="rounded-lg bg-emerald px-4 py-2 text-sm font-medium text-canvas disabled:opacity-40">
@@ -339,6 +364,34 @@ export default function HomePage() {
               </ul>
             )}
           </section>
+          <section className="panel space-y-3 rounded-2xl p-5" aria-label="Live demo scenarios">
+            <div>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Live demo scenarios</p>
+              <h2 className="text-lg font-medium">Run a judge path</h2>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-black/40" aria-label="Hourly velocity cap">
+              <div className="h-full bg-emerald" style={{ width: `${Math.min(100, Math.max(0, spendRatio))}%` }} />
+            </div>
+            <p className="text-xs text-slate-400">Hourly velocity {telemetry.connected ? `${tusd(spent)} / ${tusd(limit)}` : 'waiting for orchestrator'}</p>
+            {capEnforced ? (
+              <p className="rounded-lg border border-amber/50 bg-amber/10 px-3 py-2 text-sm text-amber" role="alert">
+                CAP ENFORCED ON-CHAIN
+              </p>
+            ) : null}
+            <div className="flex flex-col gap-2">
+              <button type="button" onClick={() => runScenario('happy_path')} className="rounded-lg bg-emerald px-3 py-2 text-left text-sm font-medium text-canvas">
+                Run Paid AI Task (0.25 tUSD8)
+              </button>
+              <button type="button" onClick={() => runScenario('velocity_attack')} className="rounded-lg border border-amber/50 px-3 py-2 text-left text-sm">
+                Simulate Runaway Loop Attack
+              </button>
+              <button type="button" onClick={() => runScenario('kill_switch_test')} className="rounded-lg border border-panic/50 px-3 py-2 text-left text-sm">
+                Test Kill Switch
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">Revoke the agent key first, then Test Kill Switch. The chain must answer SessionInactive.</p>
+          </section>
+          <OutputInspector job={latestOutput} />
           <DualTerminal logs={logs} ledger={ledger} live={live} />
         </div>
       </section>
@@ -361,6 +414,36 @@ function handshakeLines(job: OrchestratorJob): string[] {
   if (job.status === 'SETTLED') lines.push('[PROOF VERIFIED] Worker submitted execution proof on-chain. 200 OK.');
   if (job.status === 'FAILED') lines.push(`[FAIL] ${job.error || 'settlement failed'}`);
   return lines;
+}
+
+function OutputInspector({ job }: { job: OrchestratorJob | null }) {
+  let pretty = 'No settled output yet. Run the paid AI task to fill this panel.';
+  if (job?.result) {
+    try {
+      pretty = JSON.stringify(JSON.parse(job.result), null, 2);
+    } catch {
+      pretty = job.result;
+    }
+  }
+  return (
+    <section className="panel rounded-2xl p-5">
+      <h2 className="text-lg font-medium">Latest verified compute output</h2>
+      <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap font-mono text-xs text-slate-300">{pretty}</pre>
+      {job?.result_hash ? <p className="mt-3 break-all font-mono text-xs text-slate-400">resultHash {job.result_hash}</p> : null}
+      <div className="mt-3 flex flex-wrap gap-3 text-sm">
+        {job?.lock_tx_hash ? (
+          <a className="text-amber underline-offset-2 hover:underline" href={explorerTx(job.lock_tx_hash)} target="_blank" rel="noreferrer">
+            TaskEscrowLocked
+          </a>
+        ) : null}
+        {job?.claim_tx_hash ? (
+          <a className="text-emerald underline-offset-2 hover:underline" href={explorerTx(job.claim_tx_hash)} target="_blank" rel="noreferrer">
+            TaskCompleted
+          </a>
+        ) : null}
+      </div>
+    </section>
+  );
 }
 
 function Metric({ label, value, mono }: { label: string; value: string; mono?: boolean }) {

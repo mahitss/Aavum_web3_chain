@@ -14,6 +14,8 @@ alloy = { version = "0.1", features = ["full", "signer-local", "rpc-types-eth"] 
 sha3 = "0.10"
 hex = "0.4"
 dotenvy = "0.15"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"

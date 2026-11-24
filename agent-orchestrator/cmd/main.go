@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -98,6 +99,7 @@ func main() {
 	router.GET("/api/telemetry", server.handleTelemetry)
 	router.GET("/api/jobs", server.handleGetJobs)
 	router.POST("/api/jobs", server.handleCreateJob)
+	router.POST("/api/scenarios/run", server.handleScenario)
 	router.GET("/api/events", server.handleEvents)
 	x402Client.Notify = server.publishJob
 
@@ -136,8 +138,7 @@ func (s *Server) workerRoutine(id int) {
 
 		s.jobsMu.Lock()
 		if err != nil {
-			job.Status = "FAILED"
-			job.Error = err.Error()
+			s.markFailed(job, err)
 			log.Printf("[Worker-%d] Task %s failed: %v", id, job.ID, err)
 			s.publishJob(job)
 		} else {
@@ -212,10 +213,15 @@ func (s *Server) handleCreateJob(c *gin.Context) {
 		return
 	}
 
+	service := req.Service
+	if service == "" {
+		service = req.TaskType
+	}
 	job := &types.TaskJob{
 		ID:        uuid.New().String(),
 		Prompt:    req.Prompt,
 		TaskType:  req.TaskType,
+		Service:   service,
 		Status:    "PENDING",
 		CreatedAt: time.Now().UTC(),
 	}
@@ -235,6 +241,119 @@ func (s *Server) handleCreateJob(c *gin.Context) {
 	}
 	s.acceptMu.Unlock()
 	c.JSON(http.StatusAccepted, job)
+}
+
+func (s *Server) markFailed(job *types.TaskJob, err error) {
+	job.Error = err.Error()
+	switch {
+	case strings.Contains(err.Error(), "ExceedsHourlyLimit"):
+		job.Status = "BLOCKED_HOURLY_CAP"
+	case strings.Contains(err.Error(), "SessionInactive"):
+		job.Status = "BLOCKED_REVOKED"
+	default:
+		job.Status = "FAILED"
+	}
+}
+
+func (s *Server) remember(job *types.TaskJob) {
+	s.jobsMu.Lock()
+	s.jobsHistory = append(s.jobsHistory, job)
+	s.jobsMu.Unlock()
+	s.publishJob(job)
+}
+
+func (s *Server) runDirect(job *types.TaskJob) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	err := s.x402Client.ExecuteTask(ctx, job)
+	cancel()
+	s.jobsMu.Lock()
+	if err != nil {
+		s.markFailed(job, err)
+	}
+	s.hourlySpent = s.x402Client.Spent()
+	s.jobsMu.Unlock()
+	if err != nil {
+		s.publishJob(job)
+	}
+}
+
+func (s *Server) handleScenario(c *gin.Context) {
+	var body struct {
+		Scenario string `json:"scenario"`
+		Prompt   string `json:"prompt"`
+		Target   string `json:"target"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	switch body.Scenario {
+	case "happy_path":
+		prompt := body.Prompt
+		service := "ai_synthesis"
+		if body.Target != "" {
+			prompt = body.Target
+			service = "chain_audit"
+		}
+		if prompt == "" {
+			prompt = "Explain why a capped session key is safer than an unlimited token approval."
+		}
+		job := s.queueJob(prompt, service, false)
+		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
+	case "velocity_attack":
+		go s.runVelocity()
+		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "status": "running"})
+	case "kill_switch_test":
+		job := s.queueJob("Kill switch probe. This lock must revert if the session was revoked.", "ai_synthesis", false)
+		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "scenario must be happy_path, velocity_attack, or kill_switch_test"})
+	}
+}
+
+func (s *Server) queueJob(prompt string, service string, bypass bool) *types.TaskJob {
+	job := &types.TaskJob{
+		ID:             uuid.New().String(),
+		Prompt:         prompt,
+		TaskType:       service,
+		Service:        service,
+		Status:         "PENDING",
+		CreatedAt:      time.Now().UTC(),
+		BypassLocalCap: bypass,
+	}
+	s.jobsMu.Lock()
+	s.jobsHistory = append(s.jobsHistory, job)
+	s.jobsMu.Unlock()
+	s.acceptMu.Lock()
+	select {
+	case <-s.stop:
+	default:
+		s.jobsChan <- job
+	}
+	s.acceptMu.Unlock()
+	return job
+}
+
+func (s *Server) runVelocity() {
+	for n := 1; n <= 48; n++ {
+		job := &types.TaskJob{
+			ID:             uuid.New().String(),
+			Prompt:         fmt.Sprintf("Velocity probe %d. Repeat spend until the hourly cap reverts.", n),
+			TaskType:       "ai_synthesis",
+			Service:        "ai_synthesis",
+			Status:         "PENDING",
+			CreatedAt:      time.Now().UTC(),
+			BypassLocalCap: true,
+		}
+		s.remember(job)
+		s.runDirect(job)
+		if job.Status == "BLOCKED_HOURLY_CAP" || job.Status == "BLOCKED_REVOKED" {
+			return
+		}
+		if strings.Contains(job.Error, "insufficient funds") {
+			return
+		}
+	}
 }
 
 func (s *Server) publishJob(job *types.TaskJob) {

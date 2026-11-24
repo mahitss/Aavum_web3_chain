@@ -17,24 +17,28 @@ type PaymentChallenge struct {
 }
 
 type TaskJob struct {
-	ID          string    `json:"id"`
-	Prompt      string    `json:"prompt"`
-	TaskType    string    `json:"task_type"`
-	Status      string    `json:"status"`
-	Amount      *big.Int  `json:"amount,omitempty"`
-	TaskHash    string    `json:"task_hash,omitempty"`
-	TaskId      string    `json:"task_id,omitempty"`
-	LockTxHash  string    `json:"lock_tx_hash,omitempty"`
-	ClaimTxHash string    `json:"claim_tx_hash,omitempty"`
-	Result      string    `json:"result,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	SettledAt   time.Time `json:"settled_at,omitempty"`
+	ID             string    `json:"id"`
+	Prompt         string    `json:"prompt"`
+	TaskType       string    `json:"task_type"`
+	Service        string    `json:"service,omitempty"`
+	Status         string    `json:"status"`
+	Amount         *big.Int  `json:"amount,omitempty"`
+	TaskHash       string    `json:"task_hash,omitempty"`
+	TaskId         string    `json:"task_id,omitempty"`
+	LockTxHash     string    `json:"lock_tx_hash,omitempty"`
+	ClaimTxHash    string    `json:"claim_tx_hash,omitempty"`
+	Result         string    `json:"result,omitempty"`
+	ResultHash     string    `json:"result_hash,omitempty"`
+	Error          string    `json:"error,omitempty"`
+	BypassLocalCap bool      `json:"-"`
+	CreatedAt      time.Time `json:"created_at"`
+	SettledAt      time.Time `json:"settled_at,omitempty"`
 }
 
 type TaskRequest struct {
 	Prompt   string `json:"prompt" binding:"required"`
-	TaskType string `json:"task_type" binding:"required"`
+	TaskType string `json:"task_type"`
+	Service  string `json:"service"`
 }
 
 type TelemetryStats struct {

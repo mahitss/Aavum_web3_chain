@@ -1,6 +1,7 @@
 package x402
 
 import (
+	"encoding/base64"
 	"math/big"
 	"net/http"
 	"testing"
@@ -37,6 +38,26 @@ func TestParsePaymentHeaders(t *testing.T) {
 	if challenge.TaskHash[0] != 0x01 || challenge.TaskHash[31] != 0x01 {
 		t.Fatal("task hash mismatch")
 	}
+}
+
+func TestParsePaymentRequiredV2(t *testing.T) {
+	payload := []byte(`{"scheme":"nexus-escrow-v1","network":"eip155:44005","asset":"0x456569838f1d43009A91ebA4263147Afd7233483","amount":"150000","payTo":"0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266","taskHash":"0x0101010101010101010101010101010101010101010101010101010101010101","timeoutBlocks":50}`)
+	header := make(http.Header)
+	header.Set("PAYMENT-REQUIRED", base64Encode(payload))
+	challenge, err := parsePaymentHeaders(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if challenge.Protocol != "nexus-escrow-v1" {
+		t.Fatalf("scheme %s", challenge.Protocol)
+	}
+	if challenge.Amount.Cmp(big.NewInt(150000)) != 0 {
+		t.Fatalf("amount %s", challenge.Amount)
+	}
+}
+
+func base64Encode(payload []byte) string {
+	return base64.StdEncoding.EncodeToString(payload)
 }
 
 func TestReserveRejectsPerTaskAndHourlyCaps(t *testing.T) {

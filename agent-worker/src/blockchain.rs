@@ -11,7 +11,9 @@ use sha3::{Digest, Keccak256};
 use std::str::FromStr;
 use thiserror::Error;
 
-use crate::protocol::{CHAIN_ID, TASK_PRICE_UNITS};
+use alloy::providers::Provider;
+
+use crate::protocol::{CHAIN_ID, DEFAULT_TUSD8_ADDRESS};
 
 sol! {
     #[sol(rpc)]
@@ -35,6 +37,11 @@ sol! {
             bytes32 resultHash,
             bytes calldata workerSignature
         ) external;
+    }
+
+    #[sol(rpc)]
+    interface IErc20Balance {
+        function balanceOf(address account) external view returns (uint256);
     }
 }
 
@@ -114,6 +121,7 @@ impl BlockchainClient {
         &self,
         task_id_bytes: [u8; 32],
         expected_task_hash: [u8; 32],
+        required_units: u64,
     ) -> Result<(), BlockchainError> {
         let task_id = B256::from(task_id_bytes);
         let returned = self
@@ -133,7 +141,7 @@ impl BlockchainClient {
                 self.worker_address,
             ));
         }
-        let required_amount = U256::from(TASK_PRICE_UNITS);
+        let required_amount = U256::from(required_units);
         if task.amount < required_amount {
             return Err(BlockchainError::InsufficientEscrowAmount(
                 task.amount,
@@ -183,5 +191,44 @@ impl BlockchainClient {
             .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
 
         Ok(format!("{:#x}", receipt.transaction_hash))
+    }
+
+    pub async fn inspect_address(
+        &self,
+        target_hex: &str,
+    ) -> Result<serde_json::Value, BlockchainError> {
+        let target = Address::from_str(target_hex)
+            .map_err(|_| BlockchainError::RpcError("invalid address".into()))?;
+        let provider = self.contract.provider();
+        let native = provider
+            .get_balance(target)
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let nonce = provider
+            .get_transaction_count(target)
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let code = provider
+            .get_code_at(target)
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let token = Address::from_str(DEFAULT_TUSD8_ADDRESS)
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let balance = IErc20Balance::new(token, provider)
+            .balanceOf(target)
+            .call()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?
+            ._0;
+        Ok(serde_json::json!({
+            "service": "chain_audit",
+            "mode": "rpc",
+            "address": target_hex,
+            "network": "eip155:44005",
+            "nativeBalance": native.to_string(),
+            "tusd8Balance": balance.to_string(),
+            "accountType": if code.is_empty() { "EOA" } else { "Contract" },
+            "nonce": nonce,
+        }))
     }
 }
