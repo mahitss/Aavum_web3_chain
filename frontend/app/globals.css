@@ -4,6 +4,8 @@
 
 :root {
   color-scheme: dark;
+  --font-sans: "Outfit", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "Cascadia Mono", ui-monospace, monospace;
 }
 
 body {

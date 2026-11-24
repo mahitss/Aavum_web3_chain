@@ -10,17 +10,17 @@ ENV NEXT_PUBLIC_ORCHESTRATOR_API_URL=$NEXT_PUBLIC_ORCHESTRATOR_API_URL
 ENV NEXT_PUBLIC_AEVUM_RPC_URL=$NEXT_PUBLIC_AEVUM_RPC_URL
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm install
 COPY . .
 RUN npm run build
 
 FROM node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-COPY --from=build /app/package.json /app/package-lock.json ./
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/.next ./.next
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+COPY --from=build /app/.next/standalone ./
+COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/public ./public
 EXPOSE 3000
-CMD ["npx", "next", "start", "-H", "0.0.0.0", "-p", "3000"]
+ENTRYPOINT ["node", "server.js"]

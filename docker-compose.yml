@@ -2,6 +2,8 @@ services:
   agent-worker:
     build:
       context: ./agent-worker
+    env_file:
+      - .env
     ports:
       - "8080:8080"
     environment:
@@ -9,11 +11,21 @@ services:
       WORKER_PRIVATE_KEY: ${WORKER_PRIVATE_KEY}
       NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
       WORKER_PORT: 8080
+    networks:
+      - nexus402-network
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
 
   agent-orchestrator:
     build:
       context: ./agent-orchestrator
+    env_file:
+      - .env
     ports:
       - "8081:8081"
     environment:
@@ -27,8 +39,17 @@ services:
       ORCHESTRATOR_PORT: 8081
       PER_TASK_LIMIT: ${PER_TASK_LIMIT:-1000000}
       HOURLY_LIMIT: ${HOURLY_LIMIT:-10000000}
+    networks:
+      - nexus402-network
     depends_on:
-      - agent-worker
+      agent-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
 
   frontend:
@@ -42,9 +63,15 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
-      NEXT_PUBLIC_API_URL: http://localhost:8081
-      NEXT_PUBLIC_ORCHESTRATOR_API_URL: http://localhost:8081
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    networks:
+      - nexus402-network
     depends_on:
-      - agent-orchestrator
+      agent-orchestrator:
+        condition: service_healthy
     restart: unless-stopped
+
+networks:
+  nexus402-network:
+    driver: bridge
