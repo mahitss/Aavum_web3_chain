@@ -19,7 +19,7 @@ Amounts are tUSD8 base units. The worker quote is `250000` (0.25 tUSD8).
 | `block.timestamp < expiresAt` | `SessionExpired` |
 | `isActive` | `SessionInactive` |
 
-**Circuit breaker.** `emergencyRevokeSession(agentKey)` is callable only by the principal (`msg.sender` is the session owner). It sets `isActive` to false and emits `SessionRevoked(principal, agentKey, "emergency")`. The next `lockTaskEscrow` from that key reverts with `SessionInactive`. The command center exposes this as **EMERGENCY REVOKE AGENT KEY**, then shows `SESSION_REVOKED` and disables local dispatch.
+**Circuit breaker.** `emergencyRevokeSession(agentKey)` is callable only by the principal (`msg.sender` is the session owner). It sets `isActive` to false and emits `SessionRevoked(principal, agentKey, "emergency")`. The next `lockTaskEscrow` from that key reverts with `SessionInactive`. The command center exposes this as **EMERGENCY REVOKE AGENT KEY** under **PROTOCOL KILL SWITCH**, then shows `SESSION_KILLED` and disables local dispatch.
 
 **Residual risk.** Locks that are already `PENDING` stay locked until the worker claims or someone calls `refundExpiredTask` after `deadline`. Revoke stops new locks. It does not claw back a task that is still inside its deadline. Gas already sitting on the stolen key can be spent by the attacker. That is native tQDAY, not the principal's tUSD8.
 
@@ -39,7 +39,7 @@ Registration cannot be replayed to raise the cap. `nonces[principal]` is inside 
 
 **Mitigation.** `lockTaskEscrow` sets `deadline = block.number + durationBlocks`. The worker's challenge header `X-Task-Timeout-Blocks` is `50`, and the orchestrator passes that value through as `durationBlocks`. While `block.number <= deadline`, `refundExpiredTask` reverts with `DeadlineNotPassed`. After that block, any caller can refund. The contract requires `PENDING`, sets `status` to `REFUNDED`, then `safeTransfer`s the full `amount` back to `task.principal` and emits `TaskRefunded`.
 
-The worker will not claim a task that fails `getTask` checks: status must be `PENDING` (enum value 1), `worker` must be the worker's own address, `amount` must be at least `250000`, and `taskHash` must equal `keccak256` of the same request body. A lock for a different body or a smaller amount does not get a proof.
+The worker will not claim a task that fails `getTask` checks: status must be `PENDING` (enum value 1), `worker` must be the worker's own address, `amount` must be at least `250000`, and `taskHash` must equal `keccak256` of the serde_json encoding of `{prompt, task_type}`. A lock for a different body or a smaller amount does not get a proof.
 
 **Residual risk.** Funds sit in the escrow until the deadline block and until someone sends `refundExpiredTask`. The principal pays the refund gas. A worker that delivers a worthless but correctly signed result still gets paid. The contract checks the signature and the task hash, not the meaning of the output.
 
@@ -70,4 +70,4 @@ A re-entrant claim sees `COMPLETED` and reverts with `TaskNotPending` even if th
 | Forged session | Register a session the principal did not sign | EIP-712 recover must equal `principal`. Nonce increments. | `test_RegisterSessionWithValidSig`, `test_RevertWhen_InvalidSignature` |
 | Forged proof | Another key signs `keccak256(taskId, resultHash)` | Recovered signer must equal `task.worker`. | `test_RevertWhen_UnauthorizedWorkerClaims` |
 
-`scripts/mesh-bench.sh` runs five live settlements and then a sixth dispatch after `emergencyRevokeSession`. The sixth lock is expected to fail with `SessionInactive`. That script needs a funded principal, a deployed escrow, and the two agent keys. It is not a substitute for `forge test`.
+`scripts/mesh-bench.sh` dispatches 10 parallel jobs, keeps dispatching until a failure contains `ExceedsHourlyLimit`, then calls `emergencyRevokeSession` and expects the next job to fail with `SessionInactive`. That script needs a funded principal, a deployed escrow, and both agent keys. It has not been run to completion in this workspace. It is not a substitute for `forge test`.

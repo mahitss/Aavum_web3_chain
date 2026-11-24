@@ -139,4 +139,4 @@ The suite is `test_RegisterSessionWithValidSig`, `test_RevertWhen_InvalidSignatu
 | Demo video | Not recorded. Script: [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) |
 | Form text | [docs/SUBMISSION.md](docs/SUBMISSION.md) |
 
-Protocol detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Protocol detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Charter index, including domains that are out of scope: [docs/README.md](docs/README.md).

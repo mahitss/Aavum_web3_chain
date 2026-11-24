@@ -165,7 +165,7 @@ export function SessionDelegator({
           type="range"
           min={0.1}
           max={10}
-          step={0.1}
+          step={0.05}
           value={perTask}
           onChange={(event) => setPerTask(Number(event.target.value))}
           className="mt-2 w-full"

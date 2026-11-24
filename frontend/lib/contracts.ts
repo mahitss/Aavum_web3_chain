@@ -30,6 +30,13 @@ export const nexusEscrowAbi = [
   },
   {
     type: 'function',
+    name: 'refundExpiredTask',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'taskId', type: 'bytes32' }],
+    outputs: [],
+  },
+  {
+    type: 'function',
     name: 'emergencyRevokeSession',
     stateMutability: 'nonpayable',
     inputs: [{ name: 'agentKey', type: 'address' }],

@@ -3,8 +3,8 @@
 import dynamic from 'next/dynamic';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { isAddress, type Address, type Hex } from 'viem';
-import { useAccount, useReadContract } from 'wagmi';
+import { isAddress, isHex, type Address, type Hex } from 'viem';
+import { useAccount, useReadContract, useWriteContract } from 'wagmi';
 import { EmergencyPanic } from '@/components/controls/EmergencyPanic';
 import { SessionDelegator } from '@/components/controls/SessionDelegator';
 import { DualTerminal, type LedgerRow } from '@/components/terminal/DualTerminal';
@@ -49,6 +49,7 @@ function formatTtl(seconds: number) {
 
 export default function HomePage() {
   const { address, isConnected } = useAccount();
+  const refundWrite = useWriteContract();
   const [agentKey, setAgentKey] = useState('');
   const [killed, setKilled] = useState(false);
   const [prompt, setPrompt] = useState('Calculate compute hash');
@@ -118,6 +119,7 @@ export default function HomePage() {
   }, [localLedger, jobs]);
 
   const settledCount = jobs.filter((job) => job.status === 'SETTLED').length;
+  const refundable = jobs.find((job) => job.task_id && isHex(job.task_id) && job.status !== 'SETTLED');
   const expiresAt = session.data ? Number(session.data[3]) : 0;
   const ttl = expiresAt > now ? formatTtl(expiresAt - now) : '—';
   const spent = asUnits(telemetry.hourly_spent);
@@ -141,6 +143,24 @@ export default function HomePage() {
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Orchestrator unreachable');
     }
+  }
+
+  function refundEscrow() {
+    if (!refundable?.task_id || !isHex(refundable.task_id) || !NEXUS_ESCROW_ADDRESS) return;
+    refundWrite.writeContract(
+      {
+        address: NEXUS_ESCROW_ADDRESS,
+        abi: nexusEscrowAbi,
+        functionName: 'refundExpiredTask',
+        args: [refundable.task_id],
+      },
+      {
+        onSuccess: (hash) => {
+          remember('Refund', hash);
+          setNotice('Refund submitted. The contract reverts with DeadlineNotPassed until the deadline block.');
+        },
+      },
+    );
   }
 
   function remember(kind: string, hash: Hex) {
@@ -202,7 +222,16 @@ export default function HomePage() {
             <button disabled={killed} className="rounded-lg bg-white/10 px-4 py-2 text-sm disabled:opacity-40">
               Dispatch task
             </button>
+            <button
+              type="button"
+              onClick={refundEscrow}
+              disabled={!refundable || !NEXUS_ESCROW_ADDRESS || refundWrite.isPending}
+              className="rounded-lg border border-line px-4 py-2 text-sm disabled:opacity-40"
+            >
+              {refundWrite.isPending ? 'Refunding' : 'Refund expired task'}
+            </button>
             <p className="w-full font-mono text-xs text-slate-400">{notice}</p>
+            {refundWrite.error ? <p className="w-full font-mono text-xs text-panic">{refundWrite.error.message}</p> : null}
           </form>
         </div>
         <DualTerminal logs={logs} ledger={ledger} />
