@@ -1,137 +1,102 @@
-# Nexus402 architecture
+# Nexus402 Technical Specifications & System Protocol
 
-Nexus402 is a four-process system on QDay Aevum Testnet (chain id `44005`). A human principal signs one EIP-712 session. A Go orchestrator then hires a Rust worker over HTTP 402. `NexusEscrow` holds tUSD8 (`0x456569838f1d43009A91ebA4263147Afd7233483`, 6 decimals) until the worker proves the result, or until the deadline block and a refund.
+This file describes the code in this repository. It is not a claim that a particular address is live on Aevum.
 
-| Process | Role | Port |
-| --- | --- | --- |
-| Next.js command center | Session signature, tUSD8 approval, emergency revoke, mesh and terminals | 3000 |
-| Go orchestrator | 402 client, four-goroutine job pool, `lockTaskEscrow` | 8081 |
-| Rust worker | 402 challenge, escrow check, compute, `completeTaskWithProof` | 8080 |
-| `NexusEscrow` | Session caps, escrow custody, proof check, refund, revoke | Aevum |
+## 1. HTTP 402 Handshake Specification
 
-The orchestrator key pays gas for locks. The worker key pays gas for claims. tUSD8 moves `principal -> escrow -> worker`, or back to the principal on refund. The command center never stores the session private key.
+`POST /api/v1/compute` with no escrow header returns **402**. The body is JSON (`error`, `message`, `required_amount`, `token`, `task_hash`). These response headers are always set:
 
-## 1. Network topology and flow
+| Header Name | Type | Description |
+|---|---|---|
+| `X-Payment-Protocol` | string | `Nexus402-v1` |
+| `X-Payment-Token` | hex address | tUSD8: `0x456569838f1d43009A91ebA4263147Afd7233483` |
+| `X-Payment-Amount` | uint256 string | `250000` (0.25 tUSD8, 6 decimals) |
+| `X-Payment-Receiver` | hex address | The worker key derived from `WORKER_PRIVATE_KEY` |
+| `X-Task-Hash` | bytes32 hex | `keccak256` of the serde_json encoding of `{prompt, task_type}` |
+| `X-Task-Timeout-Blocks` | uint256 string | `50` |
 
-### Escrow state machine
+`X-Task-Hash` is not the hash of the raw HTTP bytes. Field order is the Rust struct order: `prompt`, then `task_type`. The orchestrator must hash the same object or the worker rejects the escrow.
 
-`EscrowStatus` is `NONE`, `PENDING`, `COMPLETED`, `REFUNDED`. A task id that has never been locked reads as `NONE`.
+After `lockTaskEscrow` mines, the orchestrator retries the same JSON body with:
 
-```mermaid
-stateDiagram-v2
-    [*] --> NONE
-    NONE --> PENDING: lockTaskEscrow
-    PENDING --> COMPLETED: completeTaskWithProof
-    PENDING --> REFUNDED: refundExpiredTask after deadline
-    COMPLETED --> [*]
-    REFUNDED --> [*]
+| Header Name | Type | Description |
+|---|---|---|
+| `X-Escrow-TaskId` | bytes32 hex | `taskId` from `TaskEscrowLocked` (the worker also accepts `X-Escrow-TaskId` spelled `X-Escrow-Taskid` in the legacy header `x-escrow-taskid`) |
+| `X-Escrow-TxHash` | bytes32 hex | Hash of the lock transaction |
+
+The paid path checks on-chain status `PENDING` (1), `task.worker` equal to this worker, `amount >= 250000`, and `task.taskHash` equal to the hash above. It then computes, signs, and calls `completeTaskWithProof`.
+
+`GET /health` on the worker returns JSON whose `status` field is `healthy`. The orchestrator `GET /health` does the same.
+
+## 2. Smart Contract State Machine
+
+Task status values: `NONE = 0`, `PENDING = 1`, `COMPLETED = 2`, `REFUNDED = 3`.
+
+```
+                    +------------------+
+                    |       NONE       |
+                    +--------+---------+
+                             | lockTaskEscrow()
+                             | requires active session
+                             v
+                    +------------------+
+                    |     PENDING      |
+                    +----+--------+----+
+                         |        |
+     completeTaskWithProof()     refundExpiredTask()
+     (worker signature)          (block.number > deadline)
+                         |        |
+                         v        v
+                  +----------+  +----------+
+                  | COMPLETED|  | REFUNDED |
+                  +----------+  +----------+
+
+emergencyRevokeSession(agentKey) is not a task transition.
+The principal sets that session isActive = false.
+The next lockTaskEscrow from that agent reverts SessionInactive.
+A task already PENDING stays PENDING until claim or refund.
 ```
 
-`COMPLETED` and `REFUNDED` are terminal. A second claim or refund reverts with `TaskNotPending`. A missing id reverts with `TaskNotFound`.
+`registerSessionWithSig` checks `expiresAt > block.timestamp`, recovers the EIP-712 signer, and requires it to equal `principal`. Typehash:
 
-### HTTP 402 then on-chain settlement
+`SessionAuthorization(address principal,address agentKey,uint256 hourlyLimit,uint256 perTaskLimit,uint256 expiresAt,uint256 nonce)`
 
-The worker prices one `POST /api/v1/compute` at `250000` base units (0.25 tUSD8) and a timeout of 50 blocks. `X-Task-Hash` is `keccak256` of the raw request body.
+The nonce stored in the signature is `nonces[principal]`, then the counter increments. A new session sets `currentWindow = block.timestamp / 3600`, `spentInWindow = 0`, `isActive = true`.
 
-```mermaid
-sequenceDiagram
-    participant O as Go orchestrator
-    participant W as Rust worker
-    participant E as NexusEscrow
+`lockTaskEscrow(principal, worker, amount, durationBlocks, taskHash)`:
 
-    O->>W: POST /api/v1/compute (no X-Escrow-TaskId)
-    W-->>O: 402 Payment Required
-    Note over W,O: X-Payment-Protocol Nexus402-v1<br/>X-Payment-Token tUSD8<br/>X-Payment-Amount 250000<br/>X-Payment-Receiver worker<br/>X-Task-Hash keccak256(body)<br/>X-Task-Timeout-Blocks 50
-    O->>O: Reserve amount against local per-task and hourly budget
-    O->>E: lockTaskEscrow(principal, worker, amount, durationBlocks, taskHash)
-    E-->>O: TaskEscrowLocked(taskId, principal, worker, amount, deadline)
-    O->>W: POST /api/v1/compute<br/>X-Escrow-TaskId, X-Escrow-TxHash
-    W->>E: getTask(taskId)
-    Note over W,E: status PENDING, worker matches,<br/>amount >= 250000, taskHash matches body
-    W->>W: resultHash = keccak256(output)
-    W->>E: completeTaskWithProof(taskId, resultHash, workerSignature)
-    E-->>W: TaskCompleted
-    W-->>O: 200 ComputeResponse (result, task_id, claim_tx_hash)
+- Caller is the agent.
+- Session active, not expired, `amount > 0`, `worker != 0`, `amount <= perTaskLimit`.
+- If `block.timestamp / 3600 > currentWindow`, the window rolls and `spentInWindow` becomes 0.
+- `spentInWindow + amount <= hourlyLimit`, or `ExceedsHourlyLimit`.
+- `safeTransferFrom(principal, escrow, amount)`.
+- `taskId = keccak256(abi.encodePacked(principal, msg.sender, worker, taskNonce++, taskHash))`.
+- `deadline = block.number + durationBlocks`.
+
+## 3. Cryptographic Proof & Settlement Mechanics
+
+No oracle. The worker hashes the output string with keccak256, then signs the 32-byte `keccak256(abi.encodePacked(taskId, resultHash))` with Alloy `sign_message`, which applies the Ethereum personal-sign prefix. The recovery id is normalized to 27 or 28.
+
+The contract, OpenZeppelin Contracts 5.0.2:
+
+```solidity
+bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
+    keccak256(abi.encodePacked(taskId, resultHash))
+);
+(address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, workerSignature);
+if (err != ECDSA.RecoverError.NoError || signer != task.worker) revert InvalidProofSignature();
 ```
 
-`taskId` is not chosen by either agent. The contract derives it:
+`ECDSA.toEthSignedMessageHash` is not on `ECDSA` in this OpenZeppelin version. A 65-byte signature must already use v = 27 or 28. OZ 5.0.2 does not add 27 when v is 0 or 1.
 
-```text
-taskId = keccak256(abi.encodePacked(
-    principal,
-    msg.sender,          // session agent key
-    worker,
-    taskNonce,           // _taskNonces[principal][agent], then incremented
-    taskHash
-))
-deadline = block.number + durationBlocks
-```
+On success the contract writes `resultHash`, sets `COMPLETED`, and `safeTransfer`s the escrowed tUSD8 to `task.worker` in the same transaction.
 
-The orchestrator reads `taskId` from `TaskEscrowLocked` topic0 `keccak256("TaskEscrowLocked(bytes32,address,address,uint256,uint256)")`.
+## 4. Process boundaries
 
-## 2. EIP-712 session delegation
+| Process | Listens | Holds |
+|---|---|---|
+| `agent-worker` | `:8080` | Worker private key. Signs claims. |
+| `agent-orchestrator` | `:8081` | Orchestrator session key. Signs locks. In-memory job list. |
+| `frontend` | `:3000` | No session private key. Reads telemetry and sends the EIP-712 signature from the connected wallet. |
 
-The human wallet signs this type once. The agent key is only the recovered `agentKey` address, not a token holder.
-
-```text
-SessionAuthorization(
-    address principal,
-    address agentKey,
-    uint256 hourlyLimit,
-    uint256 perTaskLimit,
-    uint256 expiresAt,
-    uint256 nonce
-)
-```
-
-`SESSION_TYPEHASH` is the keccak256 of that string. The struct hash is `abi.encode` of the typehash plus the six fields. `EIP712("Nexus402 Protocol", "1")` wraps it with `_hashTypedDataV4`. OpenZeppelin binds the domain separator to the contract's `name`, `version`, `block.chainid`, and `address(this)`. On Aevum that chain id is `44005`, so a signature produced for another chain or another escrow address does not recover to the principal.
-
-`registerSessionWithSig` checks, in order:
-
-1. `expiresAt > block.timestamp`, otherwise `SessionExpired`.
-2. `principal` and `agentKey` are non-zero, otherwise `InvalidSignature`.
-3. `nonces[principal]` is the nonce inside the struct. `ECDSA.tryRecover` on `(v, r, s)` must return `principal`, otherwise `InvalidSignature`.
-4. `nonces[principal]` increments by one. The same signature cannot register again.
-5. The session is stored with `currentWindow = block.timestamp / 3600`, `spentInWindow = 0`, and `isActive = true`.
-6. `SessionAuthorized` is emitted.
-
-`lockTaskEscrow` accepts only `msg.sender` equal to that session's agent key. The principal's ERC-20 allowance is what `safeTransferFrom` spends. The agent key has no transfer or withdraw function.
-
-## 3. Double-spend and velocity guardrails
-
-Limits are integer base units. One tUSD8 is `1000000`.
-
-On each lock the contract loads `_sessions[principal][msg.sender]` and rejects the call unless `isActive` is true (`SessionInactive`), `block.timestamp < expiresAt` (`SessionExpired`), `amount > 0` (`ZeroAmount`), `worker != address(0)` (`InvalidWorkerAddress`), and `amount <= perTaskLimit` (`ExceedsPerTaskLimit`).
-
-The hourly window id is integer division:
-
-```text
-window = block.timestamp / 3600
-```
-
-If `window` is greater than `currentWindow`, the contract sets `currentWindow = window` and `spentInWindow = 0` before testing the new amount. That is the top of the next 3600-second bucket. It does not pro-rate the previous hour. `spentInWindow + amount` must be `<= hourlyLimit` or the call reverts with `ExceedsHourlyLimit`. The addition is stored before `safeTransferFrom`. A failed transfer reverts the whole transaction, so the counter does not stick.
-
-`perTaskLimit` does not reset with the window. A single lock can never exceed it, including the first lock of a new hour.
-
-The orchestrator keeps a matching local budget (`PER_TASK_LIMIT`, `HOURLY_LIMIT`) and releases the reservation if the lock is not broadcast. The contract counter is the one that cannot be bypassed by a second process.
-
-## 4. Machine compute proof
-
-After compute, the worker hashes the output bytes with keccak256. The bond presented to the contract is:
-
-```text
-inner = keccak256(abi.encodePacked(taskId, resultHash))
-digest = MessageHashUtils.toEthSignedMessageHash(inner)
-```
-
-That is the Ethereum signed-message prefix (`"\x19Ethereum Signed Message:\n32"` plus `inner`). The worker signs `digest` with its escrow key. The signature is 65 bytes, `r || s || v`, with `v` in `{27, 28}`.
-
-`completeTaskWithProof` accepts the claim only when:
-
-1. The task exists and `status == PENDING`.
-2. `ECDSA.tryRecover(digest, workerSignature)` equals `task.worker`. Any other key reverts with `InvalidProofSignature`.
-3. The contract writes `resultHash` and sets `status = COMPLETED`.
-4. Only then does `safeTransfer` send `task.amount` of tUSD8 to `task.worker`.
-5. `TaskCompleted` is emitted.
-
-The recovered signer is the assigned worker for that task id, so a different node that saw the body cannot collect the escrow. The status write happens before the token move, and `nonReentrant` wraps the function, so a worker contract that tries to re-enter during `transfer` sees `COMPLETED` and is rejected.
+Inside Compose, the orchestrator calls `http://agent-worker:8080`. The browser calls `http://localhost:8081`. Jobs are not written to a database. A restart drops the queue. The chain remains the record of locks and claims.

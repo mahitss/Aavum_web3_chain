@@ -1,54 +1,52 @@
-# Nexus402: Hackathon Demo Video Script (3:30 Target Duration)
+# Nexus402: 3-Minute Hackathon Demo Script
 
-Record at 1920×1080. Command center on http://localhost:3000, wallet on QDay Aevum (chain id 44005), orchestrator on port 8081, worker on port 8080. The principal holds tUSD8 and a little tQDAY. The orchestrator agent and the worker hold tQDAY for gas. Start with no session registered.
+Record this only after `NexusEscrow` is deployed and one `./scripts/verify-e2e.sh` run has printed two real explorer URLs. Do not put a placeholder hash on screen. The on-screen revoke state in the current UI is `SESSION_KILLED`.
 
-The explorer click at 2:30 needs a real lock or claim hash from that take. Film it only after `NEXUS_ESCROW_ADDRESS` is the address `DeployAevum` logged.
+Runtime target: 3:00.
 
-### 0:00 - 0:40 | The Hook & Problem Statement
+### [0:00 - 0:30] Introduction and the M2M payment dilemma
 
-- **Visual:** Split screen showing an AI agent trapped by a MetaMask "Confirm Transaction" popup on one side, and the Nexus402 title card on the other.
-- **Voiceover:** "AI agents are transitioning from conversational chatbots into autonomous economic actors. But today, Web3 payments are broken for machines. Current dApps require a human to manually click 'Confirm' on MetaMask, while giving an LLM full private-key access leads to catastrophic drain if it hits an infinite loop or prompt injection. Machine commerce needs two things: native HTTP integration and strict cryptographic guardrails. Introducing Nexus402."
+- **Screen:** Title card. Nexus402. Tagline: agent-to-agent escrow on QDay Aevum Testnet. Chain id 44005.
+- **Narrator:**
+  "Autonomous agents can plan and call APIs. Paying each other is the gap. Wallet popups are built for a person. A raw private key on an agent is one loop away from an empty balance. Nexus402 is the payment path we built for that on the QDay Aevum Testnet. The human sets a cap once. After that, machines lock tUSD8, do the work, and claim it with a signature."
 
-### 0:40 - 1:20 | System Architecture & Platform Alignment
+### [0:30 - 1:15] Architectural blueprint
 
-- **Visual:** Architecture slide showing the Go Orchestrator, Rust Worker, and NexusEscrow.sol on QDay Aevum Testnet.
-- **Voiceover:** "Nexus402 is built on QDay Aevum Testnet, tapping into its high-throughput, sub-second settlement rails and native tUSD8 stablecoin. We built a bilateral machine-to-machine service mesh using systems-grade architecture:
-1. A high-performance Worker Agent written in Rust using Axum and Alloy.
-2. A concurrent Orchestrator Agent written in Go using goroutines and go-ethereum.
-3. An on-chain conditional escrow contract deployed on Aevum Testnet.
-Instead of custom web sockets or off-chain trust, we implement the web-native HTTP 402 Payment Required protocol."
+- **Screen:** The architecture diagram in `README.md`.
+- **Narrator:**
+  "Three pieces. A Go orchestrator holds an ephemeral session key and is the only signer allowed to lock escrow. A Rust worker, Axum and Alloy, answers unpaid calls with HTTP 402 and the price, the token, and the task hash. Solidity on Aevum holds the tUSD8 until the worker submits an Ethereum-signed proof, or until the block deadline and a full refund. The session is EIP-712. It names the agent, the hourly limit, the per-task limit, the expiry, and a nonce. The domain is Nexus402 Protocol, version 1, chain 44005."
 
-### 1:20 - 2:30 | Live Walkthrough & On-Chain Settlement
+### [1:15 - 2:15] Live settlement
 
-- **Visual:** Switch to live desktop showing the Next.js 14 Command Center with the Three.js 3D Mesh Topology on top and Dual Terminal below.
-- **Voiceover:**
-  - "Here is our 3D Command Center. First, the human operator connects their wallet and delegates an ephemeral session key to our Go Orchestrator using an EIP-712 typed signature. We set a hard per-task cap of 0.50 tUSD8 and a rolling hourly velocity ceiling of 5 tUSD8."
-  - *(Action: Click 'Sign & Authorize' in MetaMask; badge turns green.)*
-  - "Now, the Go Orchestrator autonomously dispatches a compute job to our Rust worker. Watch the live terminals."
-  - *(Action: Trigger task. Terminal streams logs.)*
-  - "Step 1: The Rust Worker intercepts the unauthenticated request and immediately returns HTTP 402 Payment Required with cryptographic task commitments."
-  - "Step 2: The Go Orchestrator parses the challenge, validates that 0.25 tUSD8 is within its session limits, and calls lockTaskEscrow on Aevum Testnet without any human approval."
-  - *(Action: Highlight glowing particle burst traversing the 3D nodes to the contract.)*
-  - "Step 3: The Rust Worker detects the on-chain lock via Alloy, runs the deterministic compute task, hashes the output, and signs the proof. It calls completeTaskWithProof on-chain to atomically release the funds."
-  - *(Action: Click the transaction hash in the right terminal to open Aevum Block Explorer.)*
-  - "Here is the verified transaction on the Aevum Explorer. Zero human intervention, sub-second execution, fully verifiable on-chain."
+- **Screen:** Command center at http://localhost:3000. Mesh on the left, terminals on the right. Wallet already funded with tQDAY and tUSD8.
+- **Actions:**
+  1. Connect Wallet. Confirm the wallet is on chain 44005.
+  2. Set the session: 0.50 tUSD8 per task, 5 tUSD8 per hour.
+  3. Approve tUSD8 if the allowance is short, then Authorize Session and sign the EIP-712 prompt.
+  4. Dispatch one hash task, or run `./scripts/verify-e2e.sh` in a terminal the camera can see.
+- **Narrator:**
+  "The operator signs the delegation. Then we send one task. The worker returns 402. The headers say Nexus402-v1, tUSD8, 250000 base units, the worker address, and the task hash. The orchestrator locks that amount with lockTaskEscrow. The worker sees the pending task, runs the hash, and calls completeTaskWithProof. The right-hand terminal should show two hashes. Open each one on explorer-test.qday.info. One is the lock. One is the claim. If either link 404s, stop. That run did not settle."
 
-### 2:30 - 3:05 | Defense-in-Depth & The Emergency Circuit Breaker
+### [2:15 - 2:45] Emergency revoke
 
-- **Visual:** Focus on the Emergency Revoke button in the UI.
-- **Voiceover:**
-  - "What happens if an agent goes rogue or is exploited? Nexus402 implements defense-in-depth:
-  First, rolling 1-hour windows reset spend caps deterministically, blocking runaway recursive loops.
-  Second, if a worker fails to deliver, the principal can claim a 100% refund after the deadline block.
-  And third, the human principal has an on-chain panic button."
-  - *(Action: Click 'EMERGENCY REVOKE AGENT KEY'.)*
-  - "We trigger emergencyRevokeSession on-chain. When the orchestrator attempts another micro-task, the contract instantly reverts with SessionInactive. The agent is neutralized on-chain."
+- **Screen:** The panic control. Title in the UI: PROTOCOL KILL SWITCH.
+- **Actions:**
+  1. Click the revoke control and confirm the principal's transaction.
+  2. Wait until the panel reads `SESSION_KILLED`.
+  3. Dispatch another task. The job must fail. The error text must include `SessionInactive`.
+- **Narrator:**
+  "Revoke does not spend the escrow. It sets that session inactive. The next lock reverts on-chain with SessionInactive. A task that was already pending can still be claimed or refunded. New spend stops."
 
-On screen the status reads `SESSION_REVOKED` and Dispatch task is disabled. Say the revert when the next lock fails.
+### [2:45 - 3:00] Close
 
-### 3:05 - 3:30 | Conclusion & QDay Mainnet Roadmap
+- **Screen:** `forge test -vvv` in `contracts/`, showing 8 passed and 0 failed, then the GitHub repository https://github.com/mahitss/Aavum_web3_chain.
+- **Narrator:**
+  "The Foundry suite is eight tests, all passing in this repo: registration, caps, the hourly window, a full claim, a bad signature, a refund, and revoke. The source is public. Settlement on Aevum is the receipt you just opened. Thank you."
 
-- **Visual:** GitHub repository overview, passing Foundry test suites, and final summary slide.
-- **Voiceover:** "Nexus402 is 100% open-source, fully tested with Foundry, Rust, and Go, and ready to deploy on QDay's upcoming mainnet in February. We are providing the fundamental payment primitive for the autonomous machine economy. Thank you."
+## Shot checklist
 
-Cut the Foundry frame from `forge test -vvv` in `contracts/` (8 tests). End on https://github.com/mahitss/Aavum_web3_chain.
+- [ ] Escrow address on screen matches `NEXUS_ESCROW_ADDRESS` in `.env`.
+- [ ] Lock URL opens on https://explorer-test.qday.info and shows `TaskEscrowLocked` or the escrow call.
+- [ ] Claim URL opens and shows `completeTaskWithProof` success.
+- [ ] Revoke transaction is the principal, not the agent key.
+- [ ] No `.env` contents, seed phrase, or private key in frame.

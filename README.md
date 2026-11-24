@@ -1,180 +1,142 @@
-# Nexus402 — Autonomous Agent-to-Agent Micro-Service Mesh & Escrow on QDay Aevum Testnet
+<div align="center">
+  <h1>NEXUS402</h1>
+  <p><strong>Autonomous Agent-to-Agent Micro-Service Mesh & Escrow Settlement on QDay Aevum Testnet</strong></p>
+  <p>
+    <a href="https://explorer-test.qday.info"><img src="https://img.shields.io/badge/Network-QDay%20Aevum%20Testnet-06b6d4?style=flat-square" alt="Network" /></a>
+    <a href="https://soliditylang.org/"><img src="https://img.shields.io/badge/Solidity-0.8.24-363636?style=flat-square&logo=solidity" alt="Solidity" /></a>
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Worker-Rust%20%7C%20Axum%20%7C%20Alloy-orange?style=flat-square&logo=rust" alt="Rust" /></a>
+    <a href="https://go.dev/"><img src="https://img.shields.io/badge/Orchestrator-Go%20%7C%20Geth%20%7C%20Gin-00ADD8?style=flat-square&logo=go" alt="Go" /></a>
+    <a href="https://nextjs.org/"><img src="https://img.shields.io/badge/Frontend-Next.js%2014%20%7C%20Three.js-black?style=flat-square&logo=next.js" alt="Next.js" /></a>
+  </p>
+</div>
 
-Nexus402 lets one agent pay another for a single unit of work without a human sitting on the approval button. A Go orchestrator hits HTTP 402, locks tUSD8 in `NexusEscrow`, and a Rust worker releases that escrow only after an Ethereum-signed proof of the result.
+---
 
-## Core problem
+## Executive Summary
 
-High-frequency agent swarms cannot wait on wallet popups. A standing ERC-20 allowance is worse: a prompt-injected agent can drain it. Payroll and streaming apps move money on a clock, not on a completed task.
+**Nexus402** is a machine-to-machine micro-commerce network. An autonomous client can hire a compute worker and settle in `tUSD8` without a human confirming every payment.
 
-Nexus402 binds each payment to one HTTP request.
+The worker answers an unpaid call with **HTTP 402 Payment Required**. The Go orchestrator, holding an **EIP-712 session key**, locks that price in **NexusEscrow** on the QDay Aevum Testnet. The Rust worker checks the pending escrow, runs the task, and claims with an Ethereum-signed proof. The human principal sets the hourly cap, the per-task cap, and can revoke the session.
 
-1. The worker answers an unpaid `POST /api/v1/compute` with **402 Payment Required** and the `X-Payment-*` headers (protocol, tUSD8, amount, receiver, task hash, timeout).
-2. The orchestrator, using an EIP-712 session key, locks that exact amount in `NexusEscrow` for the task hash.
-3. The worker re-checks the pending task on Aevum, runs deterministic compute, and claims with `completeTaskWithProof`.
-4. If the deadline block passes first, `refundExpiredTask` returns the full amount to the principal.
+---
 
-The human signs the session once. After that, settlement is machine to machine, capped, and reversible by the principal.
+## Live Testnet Deployments (QDay Aevum Testnet)
 
-## Live deployment
+| Parameter | Network Value |
+|---|---|
+| **Chain ID** | `44005` |
+| **RPC Endpoint** | https://rpc-test.qday.info |
+| **Explorer** | https://explorer-test.qday.info |
+| **Native Gas** | `tQDAY` (18 decimals) |
+| **Official Settlement Token (tUSD8)** | [`0x456569838f1d43009A91ebA4263147Afd7233483`](https://explorer-test.qday.info/address/0x456569838f1d43009A91ebA4263147Afd7233483) (6 decimals) |
+| **NexusEscrow Contract** | **Not deployed from this repository.** `contracts/broadcast/` is empty. |
 
-| | |
-| --- | --- |
-| Network | QDay Aevum Testnet |
-| Chain ID | `44005` |
-| RPC | https://rpc-test.qday.info |
-| Explorer | https://explorer-test.qday.info |
-| Settlement token (tUSD8, 6 decimals) | [`0x456569838f1d43009A91ebA4263147Afd7233483`](https://explorer-test.qday.info/address/0x456569838f1d43009A91ebA4263147Afd7233483) |
-| NexusEscrow | **Not broadcast from this workspace yet.** Set `PRIVATE_KEY` for a tQDAY-funded deployer and run the script in [Local setup](#local-setup). |
+Do not paste a guessed address into the table. After `make deploy-aevum` logs `NexusEscrow`, put that address in `.env` as `NEXUS_ESCROW_ADDRESS` and `NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS`, then replace this row.
 
-The frontend reads the escrow from `NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS`. Do not hardcode a key. After broadcast, paste the logged address into `.env` and `frontend/.env.local`.
+---
 
-Broadcast attempted in this environment failed before a transaction was sent: `PRIVATE_KEY` is not set, and there is no funded deployer key on disk. Explorer links for session registration, escrow lock, and worker claim are filled in only after that funded run. Do not treat a placeholder as a verified deployment.
-
-## Architecture
+## Systems Architecture & Information Flow
 
 ```
-                    +---------------------------+
-                    |  Next.js command center   |
-                    |  RainbowKit / EIP-712     |
-                    |  Three.js mesh + terminals|
-                    +-------------+-------------+
-                                  |
-                    sign session  |  emergencyRevokeSession
-                    approve tUSD8 |  read getSession / TVL
-                                  v
-+------------------+   HTTP 402    +------------------+
-| Go orchestrator  | ------------> | Rust worker      |
-| session key      | <------------ | compute + proof  |
-| :8081            |  X-Escrow-    | :8080            |
-+--------+---------+  TaskId       +--------+---------+
-         |                                   |
-         | lockTaskEscrow                    | completeTaskWithProof
-         | (agent pays gas)                  | (worker pays gas)
-         v                                   v
-+------------------------------------------------------+
-| NexusEscrow (Solidity 0.8.24, Cancun)                |
-| tUSD8 pulled from the principal, not the agent key   |
-| hourly window + per-task cap + refund + revoke       |
-+------------------------------------------------------+
-                          |
-                          v
-              QDay Aevum Testnet  #44005
++-----------------------------------------------------------------------------+
+|                       HUMAN PRINCIPAL / OPERATOR                            |
+|           (RainbowKit on chain 44005 / EIP-712 SessionAuthorization)        |
++----------------------------------+------------------------------------------+
+                                   | 1. EIP-712 delegation
+                                   |    hourlyLimit, perTaskLimit, expiresAt, nonce
+                                   v
++-------------------------------+  2. POST /api/v1/compute  +-------------------------------+
+|     CLIENT ORCHESTRATOR       +------------------------->|        COMPUTE WORKER         |
+|             (Go :8081)        |<-------------------------+            (Rust :8080)       |
+|  - Session key signs locks    |  3. HTTP 402              |  - 402 challenge headers      |
+|  - Retries with task id       |     X-Payment-*           |  - Proof claim via Alloy      |
++---------------+---------------+  4. X-Escrow-TaskId       +---------------+---------------+
+                |                    X-Escrow-TxHash                        |
+                | 5. lockTaskEscrow()                                      | 6. completeTaskWithProof()
+                |    tUSD8 principal -> escrow                             |    tUSD8 escrow -> worker
+                v                                                          v
++-----------------------------------------------------------------------------+
+|                    NEXUS ESCROW (QDay Aevum Testnet)                         |
+|  - Spend window is block.timestamp / 3600                                   |
+|  - Proof is eth-signed keccak256(abi.encodePacked(taskId, resultHash))      |
+|  - Refund when block.number > deadline                                      |
+|  - emergencyRevokeSession freezes new locks; it does not move a pending task|
++-----------------------------------------------------------------------------+
 ```
 
-The orchestrator key is the transaction sender for locks. tUSD8 moves `principal -> escrow -> worker` (or back to the principal on refund). The command center never holds the session private key.
+tUSD8 is pulled from the principal's allowance. The orchestrator key and the worker key pay gas in tQDAY. They do not hold the settlement balance. The command center never stores those private keys.
 
-## Security model
+---
 
-| Threat | Mitigation |
-| --- | --- |
-| Stolen or over-broad agent key | EIP-712 `SessionAuthorization` names the agent, both caps, expiry, and a monotonic nonce. Domain is `Nexus402 Protocol` / `1` / chain `44005` / the escrow address. |
-| Spend burst inside a valid session | `perTaskLimit` caps one lock. `hourlyLimit` caps the sum inside `block.timestamp / 3600`. The window resets when the hour id advances. |
-| Compromised agent still signing | Principal calls `emergencyRevokeSession(agentKey)`. Later locks revert with `SessionInactive`. |
-| Worker never delivers | `deadline` is `block.number + durationBlocks`. After that block, `refundExpiredTask` returns the full escrow to the principal. |
-| Forged completion | The claim signature is the Ethereum signed message over `keccak256(abi.encodePacked(taskId, resultHash))`. Recovery must equal `task.worker`. |
-| Replayed session signature | `nonces[principal]` is part of the typed struct and increments on each successful registration. |
-| Reentrancy on payout | Token moves use `SafeERC20` behind `ReentrancyGuard`. |
+## Security Model & Threat Matrix
 
-Amounts are tUSD8 base units (`1e6` = 1 tUSD8). The worker price is `250000` (0.25 tUSD8).
+| Threat | What the code does |
+|---|---|
+| Stolen session key drains the wallet | `lockTaskEscrow` is the agent's only token path. It cannot `transfer`, `withdraw`, or set an allowance. The pull is `safeTransferFrom(principal, escrow, amount)`, capped by `perTaskLimit` and the hourly window. |
+| Prompt-injection spend loop | After the hour id `block.timestamp / 3600` advances, `spentInWindow` resets. Inside the hour, `spentInWindow + amount > hourlyLimit` reverts with `ExceedsHourlyLimit`. |
+| Worker takes the lock and goes offline | `deadline = block.number + durationBlocks` (the worker asks for 50 blocks). After that, `refundExpiredTask` returns the full amount to the principal. Anyone may call it. The principal receives the tokens. |
+| Forged completion | `MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(taskId, resultHash)))`. `ECDSA.tryRecover` must return `task.worker` or the call reverts `InvalidProofSignature`. |
+| Replayed session signature | The EIP-712 struct includes `nonces[principal]`. Registration increments it. Domain is `Nexus402 Protocol` / `1` / chain `44005` / the escrow address. |
+| Compromised agent still locking | The principal calls `emergencyRevokeSession(agentKey)`. Later locks revert `SessionInactive`. An already `PENDING` task stays pending until claim or refund. |
+| Reentrancy on payout | `ReentrancyGuard` plus OpenZeppelin `SafeERC20`. |
 
-## Local setup
+Worker price is `250000` base units (0.25 tUSD8). Local orchestrator defaults are `PER_TASK_LIMIT=1000000` and `HOURLY_LIMIT=10000000`. Those local checks are not a substitute for the contract caps.
 
-### Docker Compose
+The longer write-up is [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
+
+---
+
+## Turnkey Quickstart
+
+### Prerequisites
+
+- Docker and Docker Compose
+- Foundry: `curl -L https://foundry.paradigm.xyz | bash` then `foundryup`
+- Go 1.22+
+- Rust 1.90+ (the worker image is `rust:1.90-slim-bookworm`; current crates need edition 2024)
+
+### Setup and run
 
 ```bash
+git clone https://github.com/mahitss/Aavum_web3_chain.git
+cd Aavum_web3_chain
+
 cp .env.example .env
-# fill NEXUS_ESCROW_ADDRESS and the three testnet keys, then:
-docker compose up --build
+# Set PRINCIPAL_*, ORCHESTRATOR_AGENT_PRIVATE_KEY, WORKER_PRIVATE_KEY,
+# and NEXUS_ESCROW_ADDRESS. Empty keys crash the worker on startup.
+
+docker compose up --build -d
+./scripts/verify-e2e.sh
 ```
 
-| Service | Port |
-| --- | --- |
-| `agent-worker` | 8080 |
-| `agent-orchestrator` | 8081 |
-| `frontend` | 3000 |
+Dashboard: http://localhost:3000. Worker: http://localhost:8080. Orchestrator: http://localhost:8081.
 
-`WORKER_URL` inside Compose is `http://agent-worker:8080`. The browser still calls `NEXT_PUBLIC_API_URL=http://localhost:8081`.
+`docker compose up` on 24 Nov 2026 built all three images, then the worker exited with `HexError(InvalidStringLength)` because `WORKER_PRIVATE_KEY` was empty. The orchestrator and frontend wait until that healthcheck passes. Fill `.env` before expecting `verify-e2e.sh` to pass.
 
-### Manual
+`make deploy-aevum` broadcasts `DeployAevum` and writes the logged address into `.env`. It exits if `PRIVATE_KEY` and `PRINCIPAL_PRIVATE_KEY` are both empty. No contract was broadcast in this workspace.
 
-**Contracts** (Foundry, Solidity 0.8.24, Cancun, OpenZeppelin Contracts v5.0.2):
+### Contract tests
 
-```bash
-cd contracts
-forge test -vvv
-```
+Run from `contracts/` on 24 Nov 2026:
 
-Deploy (legacy transactions, chain id 44005). The shell must export `PRIVATE_KEY` for an account that holds tQDAY. `TUSD8_ADDRESS` is optional and defaults to the address above.
+`forge test -vvv --gas-report` — **8 passed, 0 failed, 0 skipped**.
 
-```bash
-cd contracts
-forge script script/DeployAevum.s.sol:DeployAevum \
-  --rpc-url https://rpc-test.qday.info \
-  --broadcast \
-  --legacy \
-  -vvvv
-```
+The suite is `test_RegisterSessionWithValidSig`, `test_RevertWhen_InvalidSignature`, `test_RevertWhen_ExceedingPerTaskLimit`, `test_RollingHourlyVelocityCap`, `test_EndToEnd_LockAndCompleteProof`, `test_RevertWhen_UnauthorizedWorkerClaims`, `test_RefundExpiredTask`, `test_EmergencyRevokeCircuitBreaker`.
 
-Verify on the Blockscout-compatible explorer API:
+`scripts/verify-e2e.sh` and `scripts/mesh-bench.sh` are **UNVERIFIED** against Aevum. They need a deployed escrow, a registered session, and tQDAY on both agent keys. `mesh-bench.sh` dispatches 10 parallel jobs, then looks for `ExceedsHourlyLimit`, then `emergencyRevokeSession` and `SessionInactive`.
 
-```bash
-forge verify-contract <DEPLOYED_NEXUS_ESCROW_ADDRESS> src/NexusEscrow.sol:NexusEscrow \
-  --chain-id 44005 \
-  --verifier-url https://explorer-test.qday.info/api \
-  --verifier blockscout \
-  --constructor-args $(cast abi-encode "constructor(address)" 0x456569838f1d43009A91ebA4263147Afd7233483)
-```
+---
 
-**Worker** (Rust, Axum 0.7, Alloy 0.1):
+## Submission status
 
-```bash
-cd agent-worker
-cp .env.example .env
-cargo run --release
-```
+| Item | Status |
+|---|---|
+| Source | https://github.com/mahitss/Aavum_web3_chain |
+| Contract tests | 8 passed, this workspace, 24 Nov 2026 |
+| NexusEscrow on Aevum | Not broadcast |
+| Lock and claim transactions | Not mined |
+| Vercel frontend | Not deployed |
+| Demo video | Not recorded. Script: [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) |
+| Form text | [docs/SUBMISSION.md](docs/SUBMISSION.md) |
 
-**Orchestrator** (Go 1.22, go-ethereum v1.13.14, Gin on `:8081`):
-
-```bash
-cd agent-orchestrator
-cp .env.example .env
-go run ./cmd
-```
-
-**Command center** (Next.js 14, Wagmi v2, RainbowKit):
-
-```bash
-cd frontend
-cp .env.example .env.local
-npm install
-npm run dev
-```
-
-Before the first paid task, from the connected principal wallet:
-
-1. `approve` the escrow for at least the hourly tUSD8 budget.
-2. Sign `SessionAuthorization` and submit `registerSessionWithSig` for the orchestrator agent address.
-3. Keep the session key and the worker key funded with tQDAY. They pay gas. They do not custody tUSD8.
-
-Then `POST http://127.0.0.1:8081/api/jobs` with `{"prompt":"...","task_type":"hash"}`, or use **Dispatch task** on the dashboard. `scripts/verify-e2e.sh` checks the unpaid 402, dispatches a job, and prints the lock and claim hashes once the job is `SETTLED`. `scripts/mesh-bench.sh` repeats that path for five tasks, then sends `emergencyRevokeSession` and expects task 6 to revert with `SessionInactive`.
-
-## E2E testnet transactions
-
-These three receipts are the submission evidence. They are produced by a funded run against the deployed escrow. This workspace does not have them yet.
-
-| Step | Call | Explorer |
-| --- | --- | --- |
-| Session registration | `registerSessionWithSig` | `https://explorer-test.qday.info/tx/<SESSION_TX>` |
-| Task escrow deposit | `lockTaskEscrow` (`TaskEscrowLocked`) | `https://explorer-test.qday.info/tx/<LOCK_TX>` |
-| Proof and release | `completeTaskWithProof` (`TaskCompleted`) | `https://explorer-test.qday.info/tx/<CLAIM_TX>` |
-
-## Submission checklist
-
-- [x] Public GitHub repository: https://github.com/mahitss/Aavum_web3_chain
-- [ ] Frontend deployed on Vercel and pointed at Aevum. Local build is `npm run build` in `frontend/`.
-- [x] Contracts compile and `forge test` is green. Source verification on the explorer waits on the broadcast above.
-- [x] This README, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md), [docs/SUBMISSION.md](docs/SUBMISSION.md), and [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md).
-- [ ] 3-minute demo recorded from `docs/DEMO_SCRIPT.md` and linked on DoraHacks.
-- [x] Tracked files ignore `.env`. No private keys are committed. `contracts/broadcast/` is gitignored.
-
-The form text is [docs/SUBMISSION.md](docs/SUBMISSION.md). The demo script is [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md).
+Protocol detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
