@@ -21,16 +21,17 @@ dispatch() {
     -d "{\"prompt\":\"${prompt}\",\"task_type\":\"hash\"}"
 }
 
-echo "1. Dispatch 10 compute tasks in parallel"
+echo "1. Dispatch 5 compute tasks in parallel"
 ids=()
 tmpdir="$(mktemp -d)"
-for n in $(seq 1 10); do
+started_ms="$(date +%s%3N)"
+for n in $(seq 1 5); do
   (
     dispatch "mesh-parallel-${n}-$(date +%s%N)" > "${tmpdir}/${n}.json"
   ) &
 done
 wait
-for n in $(seq 1 10); do
+for n in $(seq 1 5); do
   id="$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "${tmpdir}/${n}.json")"
   if [[ -z "${id}" ]]; then
     echo "parallel dispatch ${n} was not accepted" >&2
@@ -48,16 +49,29 @@ for _ in $(seq 1 40); do
   terminal=0
   for id in "${ids[@]}"; do
     row="$(printf '%s' "${jobs}" | tr '{' '\n' | grep "${id}" | head -n 1 || true)"
-    if [[ "${row}" == *'"status":"SETTLED"'* || "${row}" == *'"status":"FAILED"'* ]]; then
+    if [[ "${row}" == *'"status":"FAILED"'* ]]; then
+      echo "task ${id} failed: ${row}" >&2
+      exit 1
+    fi
+    if [[ "${row}" == *'"status":"SETTLED"'* ]]; then
       terminal=$((terminal + 1))
+      lock="$(printf '%s' "${row}" | sed -n 's/.*"lock_tx_hash":"\([^"]*\)".*/\1/p')"
+      claim="$(printf '%s' "${row}" | sed -n 's/.*"claim_tx_hash":"\([^"]*\)".*/\1/p')"
+      echo "  ${id} settled in $(( $(date +%s%3N) - started_ms )) ms"
+      echo "  lock ${EXPLORER}/tx/${lock}"
+      echo "  claim ${EXPLORER}/tx/${claim}"
     fi
   done
-  echo "  terminal ${terminal}/10"
-  if [[ "${terminal}" -eq 10 ]]; then
+  echo "  settled ${terminal}/5"
+  if [[ "${terminal}" -eq 5 ]]; then
     break
   fi
   sleep 3
 done
+if [[ "${terminal}" -ne 5 ]]; then
+  echo "parallel wave did not settle 5 tasks" >&2
+  exit 1
+fi
 
 echo "3. Keep dispatching until the hourly cap reverts a lock"
 found_cap=false

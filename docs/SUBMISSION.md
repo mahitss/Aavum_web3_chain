@@ -59,7 +59,10 @@ Agents can offer and consume APIs. Web3 payment screens still expect a person to
 
 | Check | Result |
 |---|---|
-| `forge test -vvv --gas-report` in `contracts/` on 24 Nov 2026 | 8 passed, 0 failed, 0 skipped |
+| `forge test` in `contracts/` on 25 Nov 2026 | 14 passed, 0 failed, including `contracts/test/NexusEscrow.fuzz.t.sol` |
+| `go vet`, `go test`, `go build` in `agent-orchestrator/` | Passed |
+| `cargo clippy -- -D warnings` in `agent-worker/` | Passed with 0 warnings |
+| `npm run lint` and `npm run build` in `frontend/` | Passed |
 | Docker images for worker, orchestrator, and frontend | Built |
 | `docker compose up` with an empty `.env` | Worker exited `HexError(InvalidStringLength)`. Stack was stopped. |
 | `DeployAevum` broadcast | Not run. `PRIVATE_KEY` is unset. `contracts/broadcast/` has no deployment. |

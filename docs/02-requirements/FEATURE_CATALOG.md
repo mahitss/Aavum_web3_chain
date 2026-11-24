@@ -8,7 +8,7 @@
 | Escrow lock | Implemented | Needs a funded session on Aevum to mine. **UNVERIFIED** live. |
 | Proof claim | Implemented | Foundry test passes. Live claim **UNVERIFIED**. |
 | Hourly and per-task caps | Implemented | Foundry tests pass. Live bench **UNVERIFIED**. |
-| Emergency revoke | Implemented | UI shows `SESSION_KILLED`. |
+| Emergency revoke | Implemented | UI shows `SESSION_REVOKED`. |
 | Refund after deadline | Implemented | Command center calls `refundExpiredTask` for the newest unsettled task id. The chain still enforces the deadline. |
 | 3D mesh and dual terminal | Implemented | Copy buttons write to the clipboard. |
 | Docker Compose healthchecks | Implemented | Empty key fails the worker healthcheck. |

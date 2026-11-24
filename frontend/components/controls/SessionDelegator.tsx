@@ -8,6 +8,12 @@ import { explorerTx } from '@/config/chains';
 import { erc20Abi, NEXUS_ESCROW_ADDRESS, nexusEscrowAbi, TUSD8_ADDRESS } from '@/lib/contracts';
 import { cn, tusd } from '@/lib/format';
 
+function clampNumber(raw: string, min: number, max: number) {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
 const EXPIRY = [
   { label: '1 Hour', seconds: 60 * 60 },
   { label: '6 Hours', seconds: 6 * 60 * 60 },
@@ -139,8 +145,8 @@ export function SessionDelegator({
     <form onSubmit={authorize} className="panel space-y-4 rounded-2xl p-5">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <p className="text-xs uppercase tracking-[0.2em] text-emerald">Session delegation</p>
-          <h2 className="text-lg font-medium">Authorize the orchestrator key</h2>
+          <p className="text-sm text-slate-400">Step 1</p>
+          <h2 className="text-lg font-medium">Set the spend cap</h2>
         </div>
         <span className={cn('rounded-full px-3 py-1 font-mono text-xs', active ? 'bg-emerald/15 text-emerald' : 'bg-white/5 text-slate-400')}>
           {active ? 'OPERATIONAL' : 'INACTIVE'}
@@ -155,26 +161,38 @@ export function SessionDelegator({
           className="mt-1 w-full rounded-lg border border-line bg-black/30 px-3 py-2 font-mono text-sm outline-none focus:border-emerald"
         />
       </label>
-      <label className="block text-sm">
-        Hourly spend limit · {hourly} tUSD8
-        <input type="range" min={1} max={100} step={1} value={hourly} onChange={(event) => setHourly(Number(event.target.value))} className="mt-2 w-full" />
-      </label>
-      <label className="block text-sm">
-        Per-task limit · {perTask.toFixed(2).replace(/0$/, '').replace(/\.$/, '')} tUSD8
-        <input
-          type="range"
-          min={0.1}
-          max={10}
-          step={0.05}
-          value={perTask}
-          onChange={(event) => setPerTask(Number(event.target.value))}
-          className="mt-2 w-full"
-        />
-      </label>
-      <fieldset className="flex flex-wrap gap-3 text-sm">
-        <legend className="sr-only">Expiration</legend>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="block text-sm">
+          Hourly limit (tUSD8)
+          <input
+            type="number"
+            min={1}
+            max={100}
+            step={1}
+            value={hourly}
+            onChange={(event) => setHourly(clampNumber(event.target.value, 1, 100))}
+            className="mt-1 w-full rounded-lg border border-line bg-black/30 px-3 py-2 text-sm"
+          />
+          <input type="range" min={1} max={100} step={1} value={hourly} onChange={(event) => setHourly(Number(event.target.value))} className="mt-2 w-full" aria-label="Hourly spend limit slider" />
+        </label>
+        <label className="block text-sm">
+          Per-task limit (tUSD8)
+          <input
+            type="number"
+            min={0.1}
+            max={10}
+            step={0.05}
+            value={perTask}
+            onChange={(event) => setPerTask(clampNumber(event.target.value, 0.1, 10))}
+            className="mt-1 w-full rounded-lg border border-line bg-black/30 px-3 py-2 text-sm"
+          />
+          <input type="range" min={0.1} max={10} step={0.05} value={perTask} onChange={(event) => setPerTask(Number(event.target.value))} className="mt-2 w-full" aria-label="Per-task cap slider" />
+        </label>
+      </div>
+      <fieldset className="flex flex-wrap gap-2 text-sm">
+        <legend className="mb-2 w-full text-sm text-slate-300">Session length</legend>
         {EXPIRY.map((option) => (
-          <label key={option.seconds} className={cn('inline-flex items-center gap-2', expiry === option.seconds ? 'text-emerald' : 'text-slate-400')}>
+          <label key={option.seconds} className={cn('inline-flex min-h-10 items-center gap-2 rounded-lg border px-3', expiry === option.seconds ? 'border-emerald text-emerald' : 'border-line text-slate-300')}>
             <input type="radio" name="expiry" checked={expiry === option.seconds} onChange={() => setExpiry(option.seconds)} />
             {option.label}
           </label>

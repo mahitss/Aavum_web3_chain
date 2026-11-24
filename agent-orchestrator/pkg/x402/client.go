@@ -26,8 +26,9 @@ type Client struct {
 	hourlyLimit *big.Int
 	perTaskCap  *big.Int
 
-	mu    sync.Mutex
-	spent *big.Int
+	mu     sync.Mutex
+	spent  *big.Int
+	Notify func(*types.TaskJob)
 }
 
 func NewClient(workerURL string, aevumClient *aevum.Client, perTaskCap *big.Int, hourlyLimit *big.Int) *Client {
@@ -75,6 +76,7 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	}
 
 	job.Status = "402_CHALLENGED"
+	c.notify(job)
 	challenge, err := parsePaymentHeaders(resp.Header)
 	if err != nil {
 		return fmt.Errorf("invalid 402 challenge headers: %w", err)
@@ -98,6 +100,7 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	job.Status = "ESCROW_LOCKED"
 	job.TaskId = "0x" + hex.EncodeToString(taskID[:])
 	job.LockTxHash = lockTxHash
+	c.notify(job)
 
 	retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, computeURL, bytes.NewReader(reqBody))
 	if err != nil {
@@ -131,7 +134,14 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	job.Result = computeResp.Result
 	job.ClaimTxHash = computeResp.ClaimTxHash
 	job.SettledAt = time.Now()
+	c.notify(job)
 	return nil
+}
+
+func (c *Client) notify(job *types.TaskJob) {
+	if c.Notify != nil {
+		c.Notify(job)
+	}
 }
 
 func (c *Client) reserve(amount *big.Int) error {

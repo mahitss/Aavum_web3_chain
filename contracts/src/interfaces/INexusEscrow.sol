@@ -17,16 +17,10 @@ interface INexusEscrow {
     event SessionRevoked(address indexed principal, address indexed agentKey, string reason);
 
     event TaskEscrowLocked(
-        bytes32 indexed taskId,
-        address indexed principal,
-        address indexed worker,
-        uint256 amount,
-        uint256 deadline
+        bytes32 indexed taskId, address indexed principal, address indexed worker, uint256 amount, uint256 deadline
     );
 
-    event TaskCompleted(
-        bytes32 indexed taskId, address indexed worker, bytes32 resultHash, uint256 amount
-    );
+    event TaskCompleted(bytes32 indexed taskId, address indexed worker, bytes32 resultHash, uint256 amount);
 
     event TaskRefunded(bytes32 indexed taskId, address indexed principal, uint256 amount);
 
@@ -56,17 +50,12 @@ interface INexusEscrow {
 
     /// @notice Pull `amount` tUSD8 from `principal` and lock it. Caller is the agent key.
     /// @dev `durationBlocks` is added to the current block number to form the refund deadline.
-    function lockTaskEscrow(
-        address principal,
-        address worker,
-        uint256 amount,
-        uint256 durationBlocks,
-        bytes32 taskHash
-    ) external returns (bytes32 taskId);
+    function lockTaskEscrow(address principal, address worker, uint256 amount, uint256 durationBlocks, bytes32 taskHash)
+        external
+        returns (bytes32 taskId);
 
     /// @notice Release escrow to the worker after an eth-signed proof from the worker key.
-    function completeTaskWithProof(bytes32 taskId, bytes32 resultHash, bytes calldata workerSignature)
-        external;
+    function completeTaskWithProof(bytes32 taskId, bytes32 resultHash, bytes calldata workerSignature) external;
 
     /// @notice Return the full escrow to the principal once `block.number` is past `deadline`.
     function refundExpiredTask(bytes32 taskId) external;
@@ -74,10 +63,7 @@ interface INexusEscrow {
     /// @notice Principal circuit breaker. Freezes `agentKey` immediately.
     function emergencyRevokeSession(address agentKey) external;
 
-    function getSession(address principal, address agentKey)
-        external
-        view
-        returns (SessionConfig memory);
+    function getSession(address principal, address agentKey) external view returns (SessionConfig memory);
 
     function getTask(bytes32 taskId) external view returns (TaskEscrow memory);
 }

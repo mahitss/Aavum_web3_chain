@@ -100,3 +100,9 @@ On success the contract writes `resultHash`, sets `COMPLETED`, and `safeTransfer
 | `frontend` | `:3000` | No session private key. Reads telemetry and sends the EIP-712 signature from the connected wallet. |
 
 Inside Compose, the orchestrator calls `http://agent-worker:8080`. The browser calls `http://localhost:8081`. Jobs are not written to a database. A restart drops the queue. The chain remains the record of locks and claims.
+
+## 5. Live status stream
+
+`GET /api/events` is a Server-Sent Events response. Each `data:` line is one task JSON object. The orchestrator publishes `402_CHALLENGED`, `ESCROW_LOCKED`, `SETTLED`, and `FAILED`. The command center opens that stream, reconnects after a drop, and increments the mesh burst when the status is `ESCROW_LOCKED` or `SETTLED`.
+
+Lock transactions share one agent key. `PendingNonceAt` and `SendTransaction` run under `sendMu` so the four worker goroutines do not reuse a nonce. Receipt polling retries a non-`NotFound` RPC error three times with exponential backoff.

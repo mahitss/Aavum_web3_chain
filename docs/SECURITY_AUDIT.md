@@ -19,7 +19,7 @@ Amounts are tUSD8 base units. The worker quote is `250000` (0.25 tUSD8).
 | `block.timestamp < expiresAt` | `SessionExpired` |
 | `isActive` | `SessionInactive` |
 
-**Circuit breaker.** `emergencyRevokeSession(agentKey)` is callable only by the principal (`msg.sender` is the session owner). It sets `isActive` to false and emits `SessionRevoked(principal, agentKey, "emergency")`. The next `lockTaskEscrow` from that key reverts with `SessionInactive`. The command center exposes this as **EMERGENCY REVOKE AGENT KEY** under **PROTOCOL KILL SWITCH**, then shows `SESSION_KILLED` and disables local dispatch.
+**Circuit breaker.** `emergencyRevokeSession(agentKey)` is callable only by the principal (`msg.sender` is the session owner). It sets `isActive` to false and emits `SessionRevoked(principal, agentKey, "emergency")`. The next `lockTaskEscrow` from that key reverts with `SessionInactive`. The command center exposes this as **EMERGENCY REVOKE AGENT KEY** under **PROTOCOL KILL SWITCH**, then shows `SESSION_REVOKED` and disables local dispatch.
 
 **Residual risk.** Locks that are already `PENDING` stay locked until the worker claims or someone calls `refundExpiredTask` after `deadline`. Revoke stops new locks. It does not claw back a task that is still inside its deadline. Gas already sitting on the stolen key can be spent by the attacker. That is native tQDAY, not the principal's tUSD8.
 
@@ -66,8 +66,13 @@ A re-entrant claim sees `COMPLETED` and reverts with `TaskNotPending` even if th
 | Stolen agent key | Drain via the session key | No withdraw path. `perTaskLimit`, `hourlyLimit`, expiry. Principal `emergencyRevokeSession`. | `test_EmergencyRevokeCircuitBreaker` |
 | Runaway loop | Repeat `lockTaskEscrow` | Window `block.timestamp / 3600`. `ExceedsHourlyLimit`. Per-task ceiling stays in force. | `test_RollingHourlyVelocityCap`, `test_RevertWhen_ExceedingPerTaskLimit` |
 | Silent worker | Lock and never claim | `deadline = block.number + durationBlocks`. `refundExpiredTask` returns the full amount. | `test_RefundExpiredTask` |
-| Reentering worker | Claim twice from the token callback | `ReentrancyGuard` plus status write before `safeTransfer`. | `test_EndToEnd_LockAndCompleteProof`, `test_RevertWhen_UnauthorizedWorkerClaims` |
+| Reentering worker | Claim twice from the token callback | `ReentrancyGuard` plus status write before `safeTransfer`. | `test_ReentrancyOnClaimIsBlocked`, `test_ReentrancyOnRefundIsBlocked` |
+| Replay of a session signature | Submit the same EIP-712 payload, or one signed for another `chainId` | Domain includes `chainId` and `verifyingContract`. `nonces[principal]` is part of the struct and increments on success. | `test_ReplaySameNonceReverts`, `testFuzz_WrongChainIdReverts` |
+| Parallel lock nonce collision | Four orchestrator goroutines share one agent key | `pkg/aevum/escrow.go` holds `sendMu` across `PendingNonceAt` and `SendTransaction`. | Local review. Live five-way bench is not run until a funded key exists. |
+| Duplicate worker claim | Two HTTP requests with the same `X-Escrow-TaskId` | Worker `RwLock<HashSet>` rejects the second request with HTTP 409 until the first claim finishes. | Code path in `agent-worker/src/main.rs`. |
 | Forged session | Register a session the principal did not sign | EIP-712 recover must equal `principal`. Nonce increments. | `test_RegisterSessionWithValidSig`, `test_RevertWhen_InvalidSignature` |
 | Forged proof | Another key signs `keccak256(taskId, resultHash)` | Recovered signer must equal `task.worker`. | `test_RevertWhen_UnauthorizedWorkerClaims` |
 
-`scripts/mesh-bench.sh` dispatches 10 parallel jobs, keeps dispatching until a failure contains `ExceedsHourlyLimit`, then calls `emergencyRevokeSession` and expects the next job to fail with `SessionInactive`. That script needs a funded principal, a deployed escrow, and both agent keys. It has not been run to completion in this workspace. It is not a substitute for `forge test`.
+`scripts/mesh-bench.sh` dispatches 5 parallel jobs, logs lock and claim explorer links, keeps dispatching until a failure contains `ExceedsHourlyLimit`, then calls `emergencyRevokeSession` and expects the next job to fail with `SessionInactive`. That script needs a funded principal, a deployed escrow, and both agent keys. It has not been run to completion in this workspace. It is not a substitute for `forge test`.
+
+Fuzz coverage for the hourly window and the per-task ceiling is `testFuzz_LockRespectsCaps` in `contracts/test/NexusEscrow.fuzz.t.sol`. A second refund, and a refund of a `COMPLETED` task, revert with `TaskNotPending` in `test_RefundTwiceAndCompletedTaskRevert`.

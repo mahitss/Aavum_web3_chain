@@ -31,7 +31,9 @@ The worker answers an unpaid call with **HTTP 402 Payment Required**. The Go orc
 | **Official Settlement Token (tUSD8)** | [`0x456569838f1d43009A91ebA4263147Afd7233483`](https://explorer-test.qday.info/address/0x456569838f1d43009A91ebA4263147Afd7233483) (6 decimals) |
 | **NexusEscrow Contract** | **Not deployed from this repository.** `contracts/broadcast/` is empty. |
 
-Do not paste a guessed address into the table. After `make deploy-aevum` logs `NexusEscrow`, put that address in `.env` as `NEXUS_ESCROW_ADDRESS` and `NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS`, then replace this row.
+Do not paste a guessed address into the table. After `make deploy-aevum` logs `NexusEscrow`, put that address in `.env` as `NEXUS_ESCROW_ADDRESS` and `NEXT_PUBLIC_NEXUS_ESCROW_ADDRESS`, then replace this row. This workspace still has no deployer key, so the Aevum broadcast, Blockscout verification, `scripts/verify-e2e.sh`, and `scripts/mesh-bench.sh` were not run and no explorer hashes are recorded.
+
+The orchestrator serializes nonce allocation with a mutex, retries a receipt lookup up to three times, and streams task status on `GET /api/events`. The worker rejects a second in-flight claim for the same task id, limits JSON bodies to 64 KB, and rate-limits each IP. Fuzz and replay tests live in `contracts/test/NexusEscrow.fuzz.t.sol`.
 
 ---
 

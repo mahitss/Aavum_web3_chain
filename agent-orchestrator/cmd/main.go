@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"math/big"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -28,6 +32,10 @@ type Server struct {
 	hourlySpent *big.Int
 	hourlyLimit *big.Int
 	perTaskCap  *big.Int
+	events      *eventHub
+	stop        chan struct{}
+	acceptMu    sync.Mutex
+	workers     sync.WaitGroup
 }
 
 func main() {
@@ -63,6 +71,8 @@ func main() {
 		aevumClient: aevumClient,
 		x402Client:  x402Client,
 		jobsChan:    make(chan *types.TaskJob, 100),
+		events:      newEventHub(),
+		stop:        make(chan struct{}),
 		jobsHistory: make([]*types.TaskJob, 0),
 		hourlySpent: big.NewInt(0),
 		hourlyLimit: hourlyLimit,
@@ -70,6 +80,7 @@ func main() {
 	}
 
 	for i := 1; i <= 4; i++ {
+		server.workers.Add(1)
 		go server.workerRoutine(i)
 	}
 
@@ -87,17 +98,37 @@ func main() {
 	router.GET("/api/telemetry", server.handleTelemetry)
 	router.GET("/api/jobs", server.handleGetJobs)
 	router.POST("/api/jobs", server.handleCreateJob)
+	router.GET("/api/events", server.handleEvents)
+	x402Client.Notify = server.publishJob
 
-	log.Printf("Orchestrator Agent listening on http://0.0.0.0:%s", port)
-	log.Printf("Agent Address: %s", aevumClient.AgentAddress().Hex())
-	log.Printf("Principal Wallet: %s", aevumClient.PrincipalAddress().Hex())
+	httpServer := &http.Server{Addr: ":" + port, Handler: router}
+	go func() {
+		log.Printf("Orchestrator Agent listening on http://0.0.0.0:%s", port)
+		log.Printf("Agent Address: %s", aevumClient.AgentAddress().Hex())
+		log.Printf("Principal Wallet: %s", aevumClient.PrincipalAddress().Hex())
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server stopped: %v", err)
+		}
+	}()
 
-	if err := router.Run(":" + port); err != nil {
-		log.Fatalf("Server stopped: %v", err)
+	sigCtx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSig()
+	<-sigCtx.Done()
+	log.Printf("Shutting down. Draining queued tasks.")
+	close(server.stop)
+	server.acceptMu.Lock()
+	close(server.jobsChan)
+	server.acceptMu.Unlock()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP shutdown: %v", err)
 	}
+	server.workers.Wait()
 }
 
 func (s *Server) workerRoutine(id int) {
+	defer s.workers.Done()
 	for job := range s.jobsChan {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		err := s.x402Client.ExecuteTask(ctx, job)
@@ -108,6 +139,7 @@ func (s *Server) workerRoutine(id int) {
 			job.Status = "FAILED"
 			job.Error = err.Error()
 			log.Printf("[Worker-%d] Task %s failed: %v", id, job.ID, err)
+			s.publishJob(job)
 		} else {
 			log.Printf("[Worker-%d] Task %s SETTLED successfully. TxHash: %s", id, job.ID, job.ClaimTxHash)
 		}
@@ -192,8 +224,94 @@ func (s *Server) handleCreateJob(c *gin.Context) {
 	s.jobsHistory = append(s.jobsHistory, job)
 	s.jobsMu.Unlock()
 
-	s.jobsChan <- job
+	s.acceptMu.Lock()
+	select {
+	case <-s.stop:
+		s.acceptMu.Unlock()
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "orchestrator is shutting down"})
+		return
+	default:
+		s.jobsChan <- job
+	}
+	s.acceptMu.Unlock()
 	c.JSON(http.StatusAccepted, job)
+}
+
+func (s *Server) publishJob(job *types.TaskJob) {
+	s.events.broadcast(job)
+}
+
+func (s *Server) handleEvents(c *gin.Context) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming is not supported"})
+		return
+	}
+	sub := s.events.subscribe()
+	defer s.events.unsubscribe(sub)
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Status(http.StatusOK)
+	fmt.Fprintf(c.Writer, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-s.stop:
+			return
+		case payload, open := <-sub:
+			if !open {
+				return
+			}
+			fmt.Fprintf(c.Writer, "data: %s\n\n", payload)
+			flusher.Flush()
+		}
+	}
+}
+
+type eventHub struct {
+	mu   sync.Mutex
+	subs map[chan string]struct{}
+}
+
+func newEventHub() *eventHub {
+	return &eventHub{subs: map[chan string]struct{}{}}
+}
+
+func (h *eventHub) subscribe() chan string {
+	ch := make(chan string, 16)
+	h.mu.Lock()
+	h.subs[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch
+}
+
+func (h *eventHub) unsubscribe(ch chan string) {
+	h.mu.Lock()
+	if _, ok := h.subs[ch]; ok {
+		delete(h.subs, ch)
+		close(ch)
+	}
+	h.mu.Unlock()
+}
+
+func (h *eventHub) broadcast(job *types.TaskJob) {
+	payload, err := json.Marshal(job)
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.subs {
+		select {
+		case ch <- string(payload):
+		default:
+		}
+	}
 }
 
 func getEnv(key, fallback string) string {

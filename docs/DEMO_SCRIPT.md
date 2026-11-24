@@ -1,6 +1,6 @@
 # Nexus402: 3-Minute Hackathon Demo Script
 
-Record this only after `NexusEscrow` is deployed and one `./scripts/verify-e2e.sh` run has printed two real explorer URLs. Do not put a placeholder hash on screen. The on-screen revoke state in the current UI is `SESSION_KILLED`.
+Record this only after `NexusEscrow` is deployed and one `./scripts/verify-e2e.sh` run has printed two real explorer URLs. Do not put a placeholder hash on screen. The on-screen revoke state in the current UI is `SESSION_REVOKED`.
 
 Runtime target: 3:00.
 
@@ -32,7 +32,7 @@ Runtime target: 3:00.
 - **Screen:** The panic control. Title in the UI: PROTOCOL KILL SWITCH.
 - **Actions:**
   1. Click the revoke control and confirm the principal's transaction.
-  2. Wait until the panel reads `SESSION_KILLED`.
+  2. Wait until the panel reads `SESSION_REVOKED`.
   3. Dispatch another task. The job must fail. The error text must include `SessionInactive`.
 - **Narrator:**
   "Revoke does not spend the escrow. It sets that session inactive. The next lock reverts on-chain with SessionInactive. A task that was already pending can still be claimed or refunded. New spend stops."

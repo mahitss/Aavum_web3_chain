@@ -43,7 +43,8 @@ type AevumFiller = JoinFill<
     JoinFill<JoinFill<JoinFill<Identity, GasFiller>, NonceFiller>, ChainIdFiller>,
     WalletFiller<EthereumWallet>,
 >;
-type AevumProvider = FillProvider<AevumFiller, RootProvider<HttpTransport>, HttpTransport, Ethereum>;
+type AevumProvider =
+    FillProvider<AevumFiller, RootProvider<HttpTransport>, HttpTransport, Ethereum>;
 
 #[derive(Error, Debug)]
 pub enum BlockchainError {

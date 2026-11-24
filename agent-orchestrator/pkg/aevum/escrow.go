@@ -3,11 +3,14 @@ package aevum
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -49,6 +52,7 @@ type Client struct {
 	agentAddress  common.Address
 	principal     common.Address
 	chainID       *big.Int
+	sendMu        sync.Mutex
 }
 
 func NewClient(rpcURL string, privateKeyHex string, escrowAddrHex string, principalAddrHex string, chainID int64) (*Client, error) {
@@ -91,6 +95,9 @@ func (c *Client) PrincipalAddress() common.Address {
 
 func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *big.Int, durationBlocks uint64, taskHash [32]byte) ([32]byte, string, error) {
 	var taskID [32]byte
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
 	inputData, err := c.contractABI.Pack(
 		"lockTaskEscrow",
 		c.principal,
@@ -145,10 +152,24 @@ func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *
 func bindWaitMined(ctx context.Context, ec *ethclient.Client, tx *types.Transaction) (*types.Receipt, error) {
 	ticker := time.NewTicker(800 * time.Millisecond)
 	defer ticker.Stop()
+	retries := 0
 	for {
 		receipt, err := ec.TransactionReceipt(ctx, tx.Hash())
 		if err == nil {
 			return receipt, nil
+		}
+		if !errors.Is(err, ethereum.NotFound) {
+			retries++
+			if retries > 3 {
+				return nil, err
+			}
+			backoff := time.Duration(200*(1<<retries)) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			continue
 		}
 		select {
 		case <-ctx.Done():

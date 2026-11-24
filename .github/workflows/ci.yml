@@ -12,29 +12,32 @@ jobs:
         with:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
-      - name: forge test
+      - name: forge fmt, build, and test
         working-directory: contracts
-        run: forge test -vvv
+        run: forge fmt --check && forge build && forge test -vvv
 
-  orchestrator:
+  agent-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90.0"
+          components: rustfmt, clippy
+      - name: fmt, clippy, and check
+        working-directory: agent-worker
+        run: cargo fmt --check && cargo clippy -- -D warnings && cargo check
+
+  agent-orchestrator:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-      - name: go test
+      - name: vet, test, and build
         working-directory: agent-orchestrator
-        run: go test ./...
-
-  worker:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90
-      - name: cargo test
-        working-directory: agent-worker
-        run: cargo test
+        run: go vet ./... && go test ./... && go build ./...
 
   frontend:
     runs-on: ubuntu-latest
@@ -43,8 +46,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: production build
+      - name: lint and build
         working-directory: frontend
         env:
           NEXT_TELEMETRY_DISABLED: "1"
-        run: npm install && npm run build
+        run: npm ci && npm run lint && npm run build

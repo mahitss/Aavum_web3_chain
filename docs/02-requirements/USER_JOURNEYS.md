@@ -13,7 +13,7 @@ Step 4 and 5 are **UNVERIFIED** until a funded `.env` exists.
 ## Stop the agent
 
 1. Principal clicks EMERGENCY REVOKE AGENT KEY.
-2. The panel shows `SESSION_KILLED`.
+2. The panel shows `SESSION_REVOKED`.
 3. Dispatch is disabled in the UI.
 4. A later lock from that agent reverts `SessionInactive` even if something else calls the API.
 

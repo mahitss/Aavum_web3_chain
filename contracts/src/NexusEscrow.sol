@@ -51,11 +51,7 @@ contract NexusEscrow is INexusEscrow, EIP712, ReentrancyGuard {
 
         uint256 nonce = nonces[principal];
         bytes32 digest = _hashTypedDataV4(
-            keccak256(
-                abi.encode(
-                    SESSION_TYPEHASH, principal, agentKey, hourlyLimit, perTaskLimit, expiresAt, nonce
-                )
-            )
+            keccak256(abi.encode(SESSION_TYPEHASH, principal, agentKey, hourlyLimit, perTaskLimit, expiresAt, nonce))
         );
         (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, v, r, s);
         if (err != ECDSA.RecoverError.NoError || signer != principal) revert InvalidSignature();
@@ -75,13 +71,11 @@ contract NexusEscrow is INexusEscrow, EIP712, ReentrancyGuard {
     }
 
     /// @inheritdoc INexusEscrow
-    function lockTaskEscrow(
-        address principal,
-        address worker,
-        uint256 amount,
-        uint256 durationBlocks,
-        bytes32 taskHash
-    ) external nonReentrant returns (bytes32 taskId) {
+    function lockTaskEscrow(address principal, address worker, uint256 amount, uint256 durationBlocks, bytes32 taskHash)
+        external
+        nonReentrant
+        returns (bytes32 taskId)
+    {
         if (amount == 0) revert ZeroAmount();
         if (worker == address(0)) revert InvalidWorkerAddress();
 
@@ -129,9 +123,7 @@ contract NexusEscrow is INexusEscrow, EIP712, ReentrancyGuard {
         if (task.status == EscrowStatus.NONE) revert TaskNotFound();
         if (task.status != EscrowStatus.PENDING) revert TaskNotPending();
 
-        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
-            keccak256(abi.encodePacked(taskId, resultHash))
-        );
+        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(taskId, resultHash)));
         (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, workerSignature);
         if (err != ECDSA.RecoverError.NoError || signer != task.worker) revert InvalidProofSignature();
 
@@ -168,11 +160,7 @@ contract NexusEscrow is INexusEscrow, EIP712, ReentrancyGuard {
     }
 
     /// @inheritdoc INexusEscrow
-    function getSession(address principal, address agentKey)
-        external
-        view
-        returns (SessionConfig memory)
-    {
+    function getSession(address principal, address agentKey) external view returns (SessionConfig memory) {
         return _sessions[principal][agentKey];
     }
 

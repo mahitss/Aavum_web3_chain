@@ -38,8 +38,7 @@ contract NexusEscrowTest is Test {
 
     function test_RegisterSessionWithValidSig() public {
         uint256 expiresAt = block.timestamp + 1 days;
-        (uint8 v, bytes32 r, bytes32 s) =
-            _signSession(PRINCIPAL_PK, principal, agent, HOURLY, PER_TASK, expiresAt);
+        (uint8 v, bytes32 r, bytes32 s) = _signSession(PRINCIPAL_PK, principal, agent, HOURLY, PER_TASK, expiresAt);
 
         escrow.registerSessionWithSig(principal, agent, HOURLY, PER_TASK, expiresAt, v, r, s);
 
@@ -57,8 +56,7 @@ contract NexusEscrowTest is Test {
 
     function test_RevertWhen_InvalidSignature() public {
         uint256 expiresAt = block.timestamp + 1 days;
-        (uint8 v, bytes32 r, bytes32 s) =
-            _signSession(AGENT_PK, principal, agent, HOURLY, PER_TASK, expiresAt);
+        (uint8 v, bytes32 r, bytes32 s) = _signSession(AGENT_PK, principal, agent, HOURLY, PER_TASK, expiresAt);
 
         vm.expectRevert(INexusEscrow.InvalidSignature.selector);
         escrow.registerSessionWithSig(principal, agent, HOURLY, PER_TASK, expiresAt, v, r, s);
@@ -169,8 +167,7 @@ contract NexusEscrowTest is Test {
 
     function _authorizeDefault() internal {
         uint256 expiresAt = block.timestamp + 1 days;
-        (uint8 v, bytes32 r, bytes32 s) =
-            _signSession(PRINCIPAL_PK, principal, agent, HOURLY, PER_TASK, expiresAt);
+        (uint8 v, bytes32 r, bytes32 s) = _signSession(PRINCIPAL_PK, principal, agent, HOURLY, PER_TASK, expiresAt);
         escrow.registerSessionWithSig(principal, agent, HOURLY, PER_TASK, expiresAt, v, r, s);
     }
 
@@ -196,16 +193,13 @@ contract NexusEscrowTest is Test {
         uint256 nonce
     ) internal view returns (bytes32) {
         bytes32 typehash = escrow.SESSION_TYPEHASH();
-        bytes32 structHash = keccak256(
-            abi.encode(typehash, principal_, agentKey, hourlyLimit, perTaskLimit, expiresAt, nonce)
-        );
+        bytes32 structHash =
+            keccak256(abi.encode(typehash, principal_, agentKey, hourlyLimit, perTaskLimit, expiresAt, nonce));
         return keccak256(abi.encodePacked("\x19\x01", escrow.domainSeparator(), structHash));
     }
 
     function _signProof(uint256 pk, bytes32 taskId, bytes32 resultHash) internal pure returns (bytes memory) {
-        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(
-            keccak256(abi.encodePacked(taskId, resultHash))
-        );
+        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(taskId, resultHash)));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
