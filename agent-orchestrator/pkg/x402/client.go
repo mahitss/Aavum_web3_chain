@@ -52,14 +52,19 @@ func (c *Client) Spent() *big.Int {
 func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	service := canonicalService(job)
 	reqBody, err := json.Marshal(struct {
-		Prompt  string `json:"prompt"`
-		Service string `json:"service"`
-	}{Prompt: job.Prompt, Service: service})
+		Prompt          string `json:"prompt"`
+		Service         string `json:"service"`
+		SimulateTimeout bool   `json:"simulate_timeout,omitempty"`
+	}{Prompt: job.Prompt, Service: service, SimulateTimeout: job.SimulateTimeout})
 	if err != nil {
 		return fmt.Errorf("failed to serialize payload: %w", err)
 	}
 
-	computeURL := c.workerURL + "/api/v1/compute"
+	workerBase := c.workerURL
+	if job.WorkerURL != "" {
+		workerBase = strings.TrimRight(job.WorkerURL, "/")
+	}
+	computeURL := workerBase + "/api/v1/compute"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, computeURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return err
@@ -94,7 +99,7 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 		reserved = true
 	}
 
-	taskID, lockTxHash, err := c.aevumClient.LockEscrow(ctx, challenge.Receiver, challenge.Amount, challenge.TimeoutBlocks, challenge.TaskHash)
+	taskID, lockTxHash, deadline, err := c.aevumClient.LockEscrow(ctx, challenge.Receiver, challenge.Amount, challenge.TimeoutBlocks, challenge.TaskHash)
 	if err != nil {
 		if reserved {
 			c.release(challenge.Amount)
@@ -108,6 +113,7 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	job.Status = "ESCROW_LOCKED"
 	job.TaskId = "0x" + hex.EncodeToString(taskID[:])
 	job.LockTxHash = lockTxHash
+	job.Deadline = deadline
 	c.notify(job)
 
 	retryReq, err := http.NewRequestWithContext(ctx, http.MethodPost, computeURL, bytes.NewReader(reqBody))

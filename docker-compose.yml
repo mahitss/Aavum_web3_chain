@@ -12,6 +12,7 @@ services:
       NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
       WORKER_PORT: 8080
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      ENABLE_DEMO_FAULTS: ${ENABLE_DEMO_FAULTS:-false}
     networks:
       - nexus402-network
     healthcheck:
@@ -37,6 +38,7 @@ services:
       PRINCIPAL_ADDRESS: ${PRINCIPAL_ADDRESS}
       ORCHESTRATOR_AGENT_PRIVATE_KEY: ${ORCHESTRATOR_AGENT_PRIVATE_KEY}
       WORKER_URL: http://agent-worker:8080
+      WORKER_URLS: ${WORKER_URLS:-http://agent-worker:8080}
       ORCHESTRATOR_PORT: 8081
       PER_TASK_LIMIT: ${PER_TASK_LIMIT:-1000000}
       HOURLY_LIMIT: ${HOURLY_LIMIT:-10000000}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/nexus402/agent-orchestrator/pkg/aevum"
+	"github.com/nexus402/agent-orchestrator/pkg/discovery"
 	"github.com/nexus402/agent-orchestrator/pkg/sandbox"
 	"github.com/nexus402/agent-orchestrator/pkg/types"
 	"github.com/nexus402/agent-orchestrator/pkg/x402"
@@ -42,6 +44,8 @@ type Server struct {
 	workers        sync.WaitGroup
 	sandboxEnabled bool
 	sandboxLimit   *sandbox.Limiter
+	watchdog       *aevum.Watchdog
+	directory      *discovery.Directory
 }
 
 func main() {
@@ -85,7 +89,17 @@ func main() {
 		perTaskCap:     perTaskLimit,
 		sandboxEnabled: envBool("ENABLE_PUBLIC_SANDBOX"),
 		sandboxLimit:   sandbox.NewLimiter(envPositive("SANDBOX_MAX_JOBS_PER_IP_HOUR", 5), time.Hour),
+		watchdog:       aevum.NewWatchdog(aevumClient),
+		directory:      &discovery.Directory{},
 	}
+	workerURLs := getEnv("WORKER_URLS", workerURL)
+	refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	server.directory.Refresh(refreshCtx, workerURLs)
+	refreshCancel()
+	sigCtx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSig()
+	server.watchdog.OnProgress = server.onCountdown
+	go server.watchdog.Run(sigCtx)
 
 	for i := 1; i <= 4; i++ {
 		server.workers.Add(1)
@@ -107,11 +121,23 @@ func main() {
 	router.GET("/health", server.handleHealth)
 	router.GET("/api/telemetry", server.handleTelemetry)
 	router.GET("/api/sandbox/status", server.handleSandboxStatus)
+	router.GET("/api/services", server.handleServices)
 	router.GET("/api/jobs", server.handleGetJobs)
 	router.POST("/api/jobs", publicGate, server.handleCreateJob)
 	router.POST("/api/scenarios/run", publicGate, server.handleScenario)
 	router.GET("/api/events", server.handleEvents)
-	x402Client.Notify = server.publishJob
+	x402Client.Notify = func(job *types.TaskJob) {
+		server.publishJob(job)
+		if job.Status == "SETTLED" {
+			server.watchdog.Forget(job.TaskId)
+		}
+		if job.Status == "ESCROW_LOCKED" && job.TaskId != "" {
+			taskID, err := hexTask(job.TaskId)
+			if err == nil {
+				server.watchdog.Track(taskID, job.TaskId, job.Deadline, server.onRefund)
+			}
+		}
+	}
 
 	httpServer := &http.Server{Addr: ":" + port, Handler: router}
 	go func() {
@@ -123,8 +149,6 @@ func main() {
 		}
 	}()
 
-	sigCtx, stopSig := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSig()
 	<-sigCtx.Done()
 	log.Printf("Shutting down. Draining queued tasks.")
 	close(server.stop)
@@ -260,9 +284,70 @@ func (s *Server) markFailed(job *types.TaskJob, err error) {
 		job.Status = "BLOCKED_HOURLY_CAP"
 	case strings.Contains(err.Error(), "SessionInactive"):
 		job.Status = "BLOCKED_REVOKED"
+	case strings.Contains(err.Error(), "504"):
+		job.Status = "AWAITING_REFUND"
 	default:
 		job.Status = "FAILED"
 	}
+}
+
+func (s *Server) onCountdown(taskID string, head uint64, deadline uint64) {
+	s.jobsMu.Lock()
+	var job *types.TaskJob
+	for _, candidate := range s.jobsHistory {
+		if candidate.TaskId == taskID {
+			job = candidate
+			break
+		}
+	}
+	if job == nil || job.Status == "SETTLED" || job.Status == "REFUNDED" {
+		s.jobsMu.Unlock()
+		return
+	}
+	remaining := uint64(0)
+	if deadline > head {
+		remaining = deadline - head
+	}
+	job.BlocksRemaining = remaining
+	job.Event = "BLOCK_COUNTDOWN"
+	s.jobsMu.Unlock()
+	s.publishJob(job)
+}
+
+func (s *Server) onRefund(taskID string, refundTx string, err error) {
+	s.jobsMu.Lock()
+	var job *types.TaskJob
+	for _, candidate := range s.jobsHistory {
+		if candidate.TaskId == taskID {
+			job = candidate
+			break
+		}
+	}
+	if job == nil {
+		s.jobsMu.Unlock()
+		return
+	}
+	if err != nil {
+		job.Error = err.Error()
+		s.jobsMu.Unlock()
+		s.publishJob(job)
+		return
+	}
+	job.Status = "REFUNDED"
+	job.RefundTxHash = refundTx
+	job.Event = "TASK_REFUNDED"
+	s.jobsMu.Unlock()
+	s.publishJob(job)
+}
+
+func hexTask(value string) ([32]byte, error) {
+	var taskID [32]byte
+	raw, err := hex.DecodeString(strings.TrimPrefix(value, "0x"))
+	if err != nil || len(raw) != 32 {
+		return taskID, fmt.Errorf("invalid task id")
+	}
+	copy(taskID[:], raw)
+	return taskID, nil
 }
 
 func (s *Server) remember(job *types.TaskJob) {
@@ -308,28 +393,41 @@ func (s *Server) handleScenario(c *gin.Context) {
 		if prompt == "" {
 			prompt = "Explain why a capped session key is safer than an unlimited token approval."
 		}
-		job := s.queueJob(prompt, service, false)
+		job := s.queueJob(prompt, service, false, false)
 		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
 	case "velocity_attack":
 		go s.runVelocity()
 		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "status": "running"})
 	case "kill_switch_test":
-		job := s.queueJob("Kill switch probe. This lock must revert if the session was revoked.", "ai_synthesis", false)
+		job := s.queueJob("Kill switch probe. This lock must revert if the session was revoked.", "ai_synthesis", false, false)
+		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
+	case "worker_timeout_refund":
+		job := s.queueJob("https://example.com", "web_brief", false, true)
 		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "scenario must be happy_path, velocity_attack, or kill_switch_test"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "scenario must be happy_path, velocity_attack, kill_switch_test, or worker_timeout_refund"})
 	}
 }
 
-func (s *Server) queueJob(prompt string, service string, bypass bool) *types.TaskJob {
+func (s *Server) handleServices(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+	s.directory.Refresh(ctx, getEnv("WORKER_URLS", getEnv("WORKER_URL", "http://localhost:8080")))
+	c.JSON(http.StatusOK, gin.H{"workers": s.directory.List()})
+}
+
+func (s *Server) queueJob(prompt string, service string, bypass bool, simulate bool) *types.TaskJob {
+	workerURL, _ := s.directory.Endpoint(service)
 	job := &types.TaskJob{
-		ID:             uuid.New().String(),
-		Prompt:         prompt,
-		TaskType:       service,
-		Service:        service,
-		Status:         "PENDING",
-		CreatedAt:      time.Now().UTC(),
-		BypassLocalCap: bypass,
+		ID:              uuid.New().String(),
+		Prompt:          prompt,
+		TaskType:        service,
+		Service:         service,
+		Status:          "PENDING",
+		CreatedAt:       time.Now().UTC(),
+		BypassLocalCap:  bypass,
+		SimulateTimeout: simulate,
+		WorkerURL:       workerURL,
 	}
 	s.jobsMu.Lock()
 	s.jobsHistory = append(s.jobsHistory, job)

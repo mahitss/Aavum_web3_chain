@@ -44,8 +44,14 @@ type OrchestratorJob = {
   task_id?: string;
   lock_tx_hash?: string;
   claim_tx_hash?: string;
+  refund_tx_hash?: string;
+  blocks_remaining?: number;
+  event?: string;
   error?: string;
 };
+
+type CatalogService = { name: string; price: string; priceUnits?: string; timeoutBlocks?: number };
+type CatalogWorker = { url?: string; healthy?: boolean; services?: CatalogService[] };
 
 function asUnits(value: unknown): bigint {
   if (typeof value === 'string' && value.length > 0) return BigInt(value);
@@ -76,6 +82,8 @@ export default function HomePage() {
   const [burst, setBurst] = useState(0);
   const [live, setLive] = useState(false);
   const [sandbox, setSandbox] = useState<SandboxStatus>({});
+  const [catalog, setCatalog] = useState<CatalogWorker[]>([]);
+  const [refundBurst, setRefundBurst] = useState(0);
   const [localLedger, setLocalLedger] = useState<LedgerRow[]>([]);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
@@ -128,6 +136,9 @@ export default function HomePage() {
         if (job.status === 'ESCROW_LOCKED' || job.status === 'SETTLED') {
           setBurst((count) => count + 1);
         }
+        if (job.status === 'REFUNDED' || job.event === 'TASK_REFUNDED') {
+          setRefundBurst((count) => count + 1);
+        }
       };
       source.onerror = () => {
         source?.close();
@@ -155,6 +166,11 @@ export default function HomePage() {
         const response = await fetch(`${API_URL}/api/telemetry`);
         if (!response.ok) return;
         const body = (await response.json()) as Telemetry;
+        const servicesResponse = await fetch(`${API_URL}/api/services`);
+        if (servicesResponse.ok && !stop) {
+          const listed = (await servicesResponse.json()) as { workers?: CatalogWorker[] };
+          setCatalog(Array.isArray(listed.workers) ? listed.workers : []);
+        }
         const jobsResponse = await fetch(`${API_URL}/api/jobs`);
         const jobsBody = jobsResponse.ok ? ((await jobsResponse.json()) as OrchestratorJob[]) : [];
         if (stop) return;
@@ -179,6 +195,7 @@ export default function HomePage() {
       const rows: LedgerRow[] = [];
       if (job.lock_tx_hash) rows.push({ kind: 'Escrow Lock', txHash: job.lock_tx_hash, amount, status: job.status || 'Locked' });
       if (job.claim_tx_hash) rows.push({ kind: 'Proof Claim', txHash: job.claim_tx_hash, amount, status: 'Confirmed' });
+      if (job.refund_tx_hash) rows.push({ kind: 'Auto Refund', txHash: job.refund_tx_hash, amount, status: 'REFUNDED' });
       return rows;
     });
     return [...localLedger, ...remote];
@@ -195,7 +212,7 @@ export default function HomePage() {
   const spendRatio = capEnforced ? 100 : limit > 0n ? Number((spent * 100n) / limit) : 0;
   const sessionActive = Boolean(session.data?.[6]);
   const nextStep = !isConnected
-    ? 'Sandbox mode can run the three judge scenarios without a wallet. Connect MetaMask when you want to sign your own session and use the kill switch.'
+    ? 'Sandbox mode can run the four judge scenarios without a wallet. Connect MetaMask when you want to sign your own session and use the kill switch.'
     : !NEXUS_ESCROW_ADDRESS
       ? 'The escrow address is not set, so approve, register, revoke, and refund stay off.'
       : !agent
@@ -205,7 +222,7 @@ export default function HomePage() {
           : !sessionActive
             ? 'Approve tUSD8 if asked, then sign the session. Dispatch stays a local request until that session exists on-chain.'
             : telemetry.connected
-              ? 'Session is active. Send a task. The worker price is 0.25 tUSD8.'
+              ? 'Session is active. Pick a discovered service and send a task.'
               : `Session is active, but nothing is answering at ${API_URL}. Start the orchestrator before dispatch.`;
 
   async function dispatch(event: FormEvent) {
@@ -228,7 +245,7 @@ export default function HomePage() {
     }
   }
 
-  async function runScenario(scenario: 'happy_path' | 'velocity_attack' | 'kill_switch_test') {
+  async function runScenario(scenario: 'happy_path' | 'velocity_attack' | 'kill_switch_test' | 'worker_timeout_refund') {
     setNotice(`Starting ${scenario}...`);
     try {
       const response = await fetch(`${API_URL}/api/scenarios/run`, {
@@ -319,7 +336,7 @@ export default function HomePage() {
 
       <section className="panel relative h-[420px] overflow-hidden rounded-3xl">
         <MeshBoundary>
-          <MeshCanvas pulse={settledCount + burst} />
+          <MeshCanvas pulse={settledCount + burst} refundPulse={refundBurst} />
         </MeshBoundary>
         <div className="pointer-events-none absolute left-4 top-4 space-y-1 font-mono text-xs">
           <p className="text-emerald">Client Orchestrator (Go)</p>
@@ -417,8 +434,30 @@ export default function HomePage() {
               <button type="button" onClick={() => runScenario('kill_switch_test')} className="rounded-lg border border-panic/50 px-3 py-2 text-left text-sm">
                 Test Kill Switch
               </button>
+              <button type="button" onClick={() => runScenario('worker_timeout_refund')} className="rounded-lg border border-cyan/50 px-3 py-2 text-left text-sm">
+                Simulate Worker Crash & Auto-Refund
+              </button>
             </div>
             <p className="text-xs text-slate-500">Revoke the agent key first, then Test Kill Switch. The chain must answer SessionInactive.</p>
+          </section>
+          <section className="panel rounded-2xl p-5">
+            <h2 className="text-lg font-medium">Discovered services</h2>
+            {catalog.length === 0 ? (
+              <p className="mt-2 text-sm text-slate-400">The orchestrator has not published a worker catalog yet.</p>
+            ) : (
+              <ul className="mt-3 space-y-2">
+                {catalog.flatMap((worker) =>
+                  (worker.services || []).map((item) => (
+                    <li key={`${worker.url}-${item.name}`}>
+                      <button type="button" onClick={() => setService(item.name)} className="flex w-full items-center justify-between rounded-lg border border-line px-3 py-2 text-left text-sm">
+                        <span>{item.name}</span>
+                        <span className="font-mono text-xs text-slate-400">{item.price} tUSD8 · {worker.healthy ? 'healthy' : 'offline'}</span>
+                      </button>
+                    </li>
+                  )),
+                )}
+              </ul>
+            )}
           </section>
           <OutputInspector job={latestOutput} />
           <DualTerminal logs={logs} ledger={ledger} live={live} />
@@ -441,6 +480,13 @@ function handshakeLines(job: OrchestratorJob): string[] {
   }
   if (job.task_id) lines.push(`[INBOUND RETRY] POST /api/v1/compute (X-Escrow-TaskId: ${shortHash(job.task_id)})`);
   if (job.status === 'SETTLED') lines.push('[PROOF VERIFIED] Worker submitted execution proof on-chain. 200 OK.');
+  if (job.status === 'AWAITING_REFUND' || job.status === 'REFUNDED') {
+    lines.push('[WORKER FAULT] HTTP 504. completeTaskWithProof was not called. Escrow stays PENDING.');
+  }
+  if (typeof job.blocks_remaining === 'number' && job.status !== 'REFUNDED' && job.status !== 'SETTLED') {
+    lines.push(`[WATCHDOG] ${job.blocks_remaining} blocks remain before refundExpiredTask`);
+  }
+  if (job.status === 'REFUNDED') lines.push('[TASK_REFUNDED] refundExpiredTask returned the locked tUSD8 to the principal.');
   if (job.status === 'FAILED') lines.push(`[FAIL] ${job.error || 'settlement failed'}`);
   return lines;
 }
@@ -468,6 +514,11 @@ function OutputInspector({ job }: { job: OrchestratorJob | null }) {
         {job?.claim_tx_hash ? (
           <a className="text-emerald underline-offset-2 hover:underline" href={explorerTx(job.claim_tx_hash)} target="_blank" rel="noreferrer">
             TaskCompleted
+          </a>
+        ) : null}
+        {job?.refund_tx_hash ? (
+          <a className="text-cyan underline-offset-2 hover:underline" href={explorerTx(job.refund_tx_hash)} target="_blank" rel="noreferrer">
+            TaskRefunded
           </a>
         ) : null}
       </div>

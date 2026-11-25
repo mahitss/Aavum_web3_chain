@@ -82,6 +82,10 @@ tUSD8 is pulled from the principal's allowance. The orchestrator key and the wor
 | Compromised agent still locking | The principal calls `emergencyRevokeSession(agentKey)`. Later locks revert `SessionInactive`. An already `PENDING` task stays pending until claim or refund. |
 | Reentrancy on payout | `ReentrancyGuard` plus OpenZeppelin `SafeERC20`. |
 
+The worker publishes that catalog at `GET /.well-known/nexus402.json` (`network: eip155:44005`, `protocol: x402-v2`). On startup, and on `GET /api/services`, the orchestrator fetches it from `WORKER_URLS` (comma-separated; `WORKER_URL` is the fallback) and routes a job to a healthy worker that offers the requested service.
+
+A background watchdog polls the Aevum block height every 3 seconds. After `currentBlock > deadline` it calls `refundExpiredTask`, stores `refundTxHash`, and emits `TASK_REFUNDED` on `GET /api/events`. A settled task is dropped from that watch list. `ENABLE_DEMO_FAULTS=true` lets `POST /api/v1/compute` with `simulate_timeout: true` verify the lock and then return HTTP 504 without `completeTaskWithProof`. The judge scenario `worker_timeout_refund` uses that path for `web_brief` (0.15 tUSD8) with a 5-block deadline. Leave `ENABLE_DEMO_FAULTS` false outside that demo.
+
 Paid services are `web_brief` at `150000` (0.15 tUSD8), `ai_synthesis` at `250000` (0.25 tUSD8), and `chain_audit` at `500000` (0.50 tUSD8). The 402 challenge is a Base64 `PAYMENT-REQUIRED` header (`scheme: nexus-escrow-v1`, `network: eip155:44005`). The retry sends `PAYMENT-SIGNATURE`, and a settled call returns `PAYMENT-RESPONSE`. `ai_synthesis` calls `LLM_API_URL` when `LLM_API_KEY` is set and otherwise returns a deterministic brief marked `deterministic_fallback`. Local orchestrator defaults are `PER_TASK_LIMIT=1000000` and `HOURLY_LIMIT=10000000`. Those local checks are not a substitute for the contract caps. The velocity scenario bypasses the local hourly reserve so the contract's `ExceedsHourlyLimit` is the one that stops the loop.
 
 The longer write-up is [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).

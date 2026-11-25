@@ -13,9 +13,10 @@ use protocol::{
     calculate_task_hash, decode_header, encode_header, resolve_service, service_price,
     ComputeRequest, ComputeResponse, PaymentRequired, PaymentRequiredError, PaymentResponseHeader,
     PaymentSignature, X402Required, DEFAULT_RPC_URL, DEFAULT_TUSD8_ADDRESS, EXPLORER_TX_PREFIX,
-    PAYMENT_REQUIRED, PAYMENT_RESPONSE, PAYMENT_SIGNATURE, PROTOCOL_VERSION, TASK_TIMEOUT_BLOCKS,
-    X_ESCROW_TASK_ID, X_ESCROW_TASK_ID_LEGACY, X_PAYMENT_AMOUNT, X_PAYMENT_PROTOCOL,
-    X_PAYMENT_RECEIVER, X_PAYMENT_TOKEN, X_TASK_HASH, X_TASK_TIMEOUT_BLOCKS,
+    PAYMENT_REQUIRED, PAYMENT_RESPONSE, PAYMENT_SIGNATURE, PRICE_AI_SYNTHESIS, PRICE_CHAIN_AUDIT,
+    PRICE_WEB_BRIEF, PROTOCOL_VERSION, TASK_TIMEOUT_BLOCKS, X_ESCROW_TASK_ID,
+    X_ESCROW_TASK_ID_LEGACY, X_PAYMENT_AMOUNT, X_PAYMENT_PROTOCOL, X_PAYMENT_RECEIVER,
+    X_PAYMENT_TOKEN, X_TASK_HASH, X_TASK_TIMEOUT_BLOCKS,
 };
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -84,6 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/.well-known/nexus402.json", get(catalog_handler))
         .route("/api/v1/compute", post(compute_handler))
         .layer(cors)
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -209,6 +211,19 @@ impl Drop for FlightGuard {
     }
 }
 
+async fn catalog_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "worker": state.blockchain.worker_address().to_string(),
+        "network": "eip155:44005",
+        "protocol": "x402-v2",
+        "services": [
+            {"name": "web_brief", "price": "0.15", "priceUnits": PRICE_WEB_BRIEF.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "public https URL"},
+            {"name": "ai_synthesis", "price": "0.25", "priceUnits": PRICE_AI_SYNTHESIS.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "prompt text"},
+            {"name": "chain_audit", "price": "0.50", "priceUnits": PRICE_CHAIN_AUDIT.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "0x address"}
+        ]
+    }))
+}
+
 async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "healthy",
@@ -231,6 +246,20 @@ async fn compute_handler(
             )
                 .into_response();
         }
+    };
+    let faults = std::env::var("ENABLE_DEMO_FAULTS")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false);
+    let header_fault = headers
+        .get("x-simulate-timeout")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| matches!(value, "1" | "true" | "TRUE"))
+        .unwrap_or(false);
+    let simulate_timeout = faults && (payload.simulate_timeout || header_fault);
+    let timeout_blocks = if simulate_timeout {
+        5
+    } else {
+        TASK_TIMEOUT_BLOCKS
     };
     let price = service_price(service);
     let task_hash = calculate_task_hash(&payload);
@@ -283,7 +312,7 @@ async fn compute_handler(
             amount: price.to_string(),
             pay_to: state.blockchain.worker_address().to_string(),
             task_hash: task_hash_hex.clone(),
-            timeout_blocks: TASK_TIMEOUT_BLOCKS,
+            timeout_blocks,
         };
         let wire = X402Required {
             x402_version: 2,
@@ -304,7 +333,7 @@ async fn compute_handler(
         response_headers.insert(X_TASK_HASH.clone(), task_hash_hex.parse().unwrap());
         response_headers.insert(
             X_TASK_TIMEOUT_BLOCKS.clone(),
-            TASK_TIMEOUT_BLOCKS.to_string().parse().unwrap(),
+            timeout_blocks.to_string().parse().unwrap(),
         );
         return response;
     };
@@ -353,6 +382,19 @@ async fn compute_handler(
             Json(serde_json::json!({
                 "error": "Escrow verification failed",
                 "details": err.to_string()
+            })),
+        )
+            .into_response();
+    }
+
+    if simulate_timeout {
+        info!("Demo fault armed. Leaving task 0x{task_id_hex} pending for the refund watchdog.");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        return (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({
+                "error": "simulated worker timeout",
+                "task_id": format!("0x{task_id_hex}")
             })),
         )
             .into_response();

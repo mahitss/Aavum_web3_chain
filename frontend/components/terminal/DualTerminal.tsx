@@ -82,7 +82,7 @@ export function DualTerminal({ logs, ledger, live = false }: { logs: string[]; l
                     </a>
                   </td>
                   <td>{row.amount ? tusd(row.amount) : '—'}</td>
-                  <td>{row.status}</td>
+                  <td className={row.status === 'REFUNDED' ? 'text-cyan' : ''}>{row.status}</td>
                 </tr>
               ))}
             </tbody>

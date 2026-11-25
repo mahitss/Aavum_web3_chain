@@ -34,6 +34,8 @@ pub struct ComputeRequest {
     pub service: String,
     #[serde(default)]
     pub task_type: String,
+    #[serde(default)]
+    pub simulate_timeout: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +165,7 @@ mod tests {
             prompt: "Generate test payload".to_string(),
             service: String::new(),
             task_type: "hash".to_string(),
+            simulate_timeout: false,
         };
         let first = calculate_task_hash(&request);
         let second = calculate_task_hash(&request);

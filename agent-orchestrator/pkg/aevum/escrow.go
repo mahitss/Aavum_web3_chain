@@ -94,7 +94,7 @@ func (c *Client) PrincipalAddress() common.Address {
 	return c.principal
 }
 
-func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *big.Int, durationBlocks uint64, taskHash [32]byte) ([32]byte, string, error) {
+func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *big.Int, durationBlocks uint64, taskHash [32]byte) ([32]byte, string, uint64, error) {
 	var taskID [32]byte
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
@@ -108,12 +108,12 @@ func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *
 		taskHash,
 	)
 	if err != nil {
-		return taskID, "", fmt.Errorf("failed to pack lockTaskEscrow calldata: %w", err)
+		return taskID, "", 0, fmt.Errorf("failed to pack lockTaskEscrow calldata: %w", err)
 	}
 
 	nonce, err := c.ec.PendingNonceAt(ctx, c.agentAddress)
 	if err != nil {
-		return taskID, "", fmt.Errorf("failed to get pending nonce: %w", err)
+		return taskID, "", 0, fmt.Errorf("failed to get pending nonce: %w", err)
 	}
 
 	gasPrice, err := c.ec.SuggestGasPrice(ctx)
@@ -124,30 +124,75 @@ func (c *Client) LockEscrow(ctx context.Context, worker common.Address, amount *
 	tx := types.NewTransaction(nonce, c.escrowAddress, big.NewInt(0), 300_000, gasPrice, inputData)
 	signedTx, err := types.SignTx(tx, types.NewCancunSigner(c.chainID), c.privateKey)
 	if err != nil {
-		return taskID, "", fmt.Errorf("failed to sign transaction: %w", err)
+		return taskID, "", 0, fmt.Errorf("failed to sign transaction: %w", err)
 	}
 
 	if err := c.ec.SendTransaction(ctx, signedTx); err != nil {
-		return taskID, signedTx.Hash().Hex(), c.revertError(ctx, inputData, err)
+		return taskID, signedTx.Hash().Hex(), 0, c.revertError(ctx, inputData, err)
 	}
 
 	txHash := signedTx.Hash().Hex()
 	receipt, err := bindWaitMined(ctx, c.ec, signedTx)
 	if err != nil {
-		return taskID, txHash, fmt.Errorf("transaction confirmation failed: %w", err)
+		return taskID, txHash, 0, fmt.Errorf("transaction confirmation failed: %w", err)
 	}
 	if receipt.Status != types.ReceiptStatusSuccessful {
-		return taskID, txHash, c.revertError(ctx, inputData, fmt.Errorf("transaction execution reverted on-chain: %s", txHash))
+		return taskID, txHash, 0, c.revertError(ctx, inputData, fmt.Errorf("transaction execution reverted on-chain: %s", txHash))
 	}
 
 	eventTopic := c.contractABI.Events["TaskEscrowLocked"].ID
 	for _, log := range receipt.Logs {
 		if log.Address == c.escrowAddress && len(log.Topics) > 1 && log.Topics[0] == eventTopic {
 			copy(taskID[:], log.Topics[1].Bytes())
-			return taskID, txHash, nil
+			deadline := receipt.BlockNumber.Uint64() + durationBlocks
+			if len(log.Data) >= 64 {
+				deadline = new(big.Int).SetBytes(log.Data[32:64]).Uint64()
+			}
+			return taskID, txHash, deadline, nil
 		}
 	}
-	return taskID, txHash, fmt.Errorf("TaskEscrowLocked event not found in receipt")
+	return taskID, txHash, 0, fmt.Errorf("TaskEscrowLocked event not found in receipt")
+}
+
+func (c *Client) RefundExpired(ctx context.Context, taskID [32]byte) (string, error) {
+	parsed, err := abi.JSON(strings.NewReader(`[{"name":"refundExpiredTask","type":"function","inputs":[{"name":"taskId","type":"bytes32"}],"outputs":[]}]`))
+	if err != nil {
+		return "", err
+	}
+	inputData, err := parsed.Pack("refundExpiredTask", taskID)
+	if err != nil {
+		return "", err
+	}
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	nonce, err := c.ec.PendingNonceAt(ctx, c.agentAddress)
+	if err != nil {
+		return "", err
+	}
+	gasPrice, err := c.ec.SuggestGasPrice(ctx)
+	if err != nil || gasPrice == nil || gasPrice.Sign() <= 0 {
+		gasPrice = big.NewInt(20_000_000_000)
+	}
+	tx := types.NewTransaction(nonce, c.escrowAddress, big.NewInt(0), 200_000, gasPrice, inputData)
+	signedTx, err := types.SignTx(tx, types.NewCancunSigner(c.chainID), c.privateKey)
+	if err != nil {
+		return "", err
+	}
+	if err := c.ec.SendTransaction(ctx, signedTx); err != nil {
+		return signedTx.Hash().Hex(), c.revertError(ctx, inputData, err)
+	}
+	receipt, err := bindWaitMined(ctx, c.ec, signedTx)
+	if err != nil {
+		return signedTx.Hash().Hex(), err
+	}
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return signedTx.Hash().Hex(), c.revertError(ctx, inputData, fmt.Errorf("refund reverted: %s", signedTx.Hash().Hex()))
+	}
+	return signedTx.Hash().Hex(), nil
+}
+
+func (c *Client) BlockNumber(ctx context.Context) (uint64, error) {
+	return c.ec.BlockNumber(ctx)
 }
 
 func (c *Client) revertError(ctx context.Context, data []byte, fallback error) error {

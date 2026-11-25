@@ -1,6 +1,6 @@
 # DoraHacks Submission Form: Nexus402
 
-Copy the sections below into the form. Three artifacts are still missing in this workspace. Leave the insert tokens until they exist. Do not submit a guessed address, a local signed hash, or a video link that 404s.
+Copy the sections below into the form. The contract address, transaction hashes, Render URLs, Vercel URL, and demo video are still not recorded in this workspace. Do not submit a guessed address, a local signed hash, or a video link that 404s.
 
 ## Project Name
 
@@ -30,7 +30,7 @@ Agents can offer and consume APIs. Web3 payment screens still expect a person to
 2. **EIP-712 session.** The principal signs `SessionAuthorization` for one agent, an hourly limit, a per-task limit, an expiry, and a nonce. Domain: `Nexus402 Protocol`, version `1`, chain id `44005`, verifying contract = the escrow.
 3. **Escrow lock.** The agent calls `lockTaskEscrow`. tUSD8 moves from the principal to the contract. The agent cannot transfer that balance elsewhere.
 4. **Proof claim.** The worker signs `keccak256(abi.encodePacked(taskId, resultHash))` with the Ethereum personal-sign prefix and calls `completeTaskWithProof`. OpenZeppelin 5.0.2 checks it with `MessageHashUtils.toEthSignedMessageHash` and `ECDSA.tryRecover`.
-5. **Failure paths.** After `block.number > deadline`, `refundExpiredTask` returns the full amount to the principal. `emergencyRevokeSession` stops new locks with `SessionInactive`. It does not rewrite a task that is already pending.
+5. **Failure paths.** After `block.number > deadline`, `refundExpiredTask` returns the full amount to the principal. The orchestrator watchdog calls that function on its own and emits `TASK_REFUNDED`. `emergencyRevokeSession` stops new locks with `SessionInactive`. It does not rewrite a task that is already pending. The worker catalog is `GET /.well-known/nexus402.json`. `ENABLE_DEMO_FAULTS=true` is required before the worker-crash scenario returns HTTP 504.
 
 ## Tech Stack
 
@@ -45,15 +45,15 @@ Agents can offer and consume APIs. Web3 payment screens still expect a person to
 - **RPC:** https://rpc-test.qday.info
 - **Explorer:** https://explorer-test.qday.info
 - **Settlement token (tUSD8):** `0x456569838f1d43009A91ebA4263147Afd7233483`
-- **Contract address:** `<INSERT_DEPLOYED_CONTRACT_ADDRESS>`
-- **Sample lock transaction:** `<INSERT_EXPLORER_TX_LINK>`
-- **Sample claim transaction:** `<INSERT_EXPLORER_TX_LINK>`
+- **Contract address:** Not recorded. `contracts/broadcast/` has no Aevum deployment.
+- **Sample lock transaction:** Not recorded. See `docs/BENCHMARK_REPORT.md`.
+- **Sample claim transaction:** Not recorded. See `docs/BENCHMARK_REPORT.md`.
 
 ## Deliverables and Links
 
 - **GitHub repository:** https://github.com/mahitss/Aavum_web3_chain
-- **Demo video (YouTube or Loom):** `<INSERT_YOUTUBE_OR_LOOM_LINK>`
-- **Live demo site:** `<INSERT_VERCEL_APP_URL>`
+- **Demo video (YouTube or Loom):** Not recorded.
+- **Live demo site:** Not deployed. Render and Vercel URLs are unset.
 
 ## What was verified here
 
@@ -69,4 +69,4 @@ Agents can offer and consume APIs. Web3 payment screens still expect a person to
 | `./scripts/verify-e2e.sh` against Aevum | Not run to `SETTLED` |
 | Video upload and Vercel | Not done |
 
-Fill the three insert tokens only from that funded run and from the uploaded recording. The script for the recording is [DEMO_SCRIPT.md](DEMO_SCRIPT.md).
+Record the missing links only from a funded Aevum run and from the uploaded recording. The script for the recording is [DEMO_SCRIPT.md](DEMO_SCRIPT.md). The benchmark table is [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md).

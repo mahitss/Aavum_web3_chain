@@ -84,14 +84,23 @@ function EscrowNode() {
   );
 }
 
-function ParticleStream({ active }: { active: boolean }) {
+function alongRefund(t: number): [number, number, number] {
+  const local = ((t % 1) + 1) % 1;
+  return [
+    ESCROW[0] + (ORCH[0] - ESCROW[0]) * local,
+    ESCROW[1] + (ORCH[1] - ESCROW[1]) * local,
+    ESCROW[2] + (ORCH[2] - ESCROW[2]) * local,
+  ];
+}
+
+function ParticleStream({ active, reverse = false }: { active: boolean; reverse?: boolean }) {
   const meshes = useRef<Array<Mesh | null>>([]);
   const started = useMemo(() => performance.now(), [active]);
   useFrame(() => {
     meshes.current.forEach((mesh, index) => {
       if (!mesh) return;
       const t = ((performance.now() - started) / 2200 + index * 0.12) % 1;
-      const [x, y, z] = along(t);
+      const [x, y, z] = reverse ? alongRefund(t) : along(t);
       mesh.position.set(x, y, z);
     });
   });
@@ -106,14 +115,14 @@ function ParticleStream({ active }: { active: boolean }) {
           }}
         >
           <sphereGeometry args={[0.045, 12, 12]} />
-          <meshBasicMaterial color="#fef3c7" />
+          <meshBasicMaterial color={reverse ? (index % 2 === 0 ? '#f59e0b' : '#67e8f9') : '#fef3c7'} />
         </mesh>
       ))}
     </>
   );
 }
 
-export function MeshCanvas({ pulse }: { pulse: number }) {
+export function MeshCanvas({ pulse, refundPulse = 0 }: { pulse: number; refundPulse?: number }) {
   return (
     <Canvas camera={{ position: [0, 1.15, 6.4], fov: 45 }} className="h-full w-full">
       <color attach="background" args={['#05070a']} />
@@ -128,6 +137,7 @@ export function MeshCanvas({ pulse }: { pulse: number }) {
       <Line points={[ORCH, ESCROW]} color="#f59e0b" />
       <Line points={[WORKER, ESCROW]} color="#06b6d4" />
       <ParticleStream active={pulse > 0} />
+      <ParticleStream active={refundPulse > 0} reverse />
       <Grid
         position={[0, -1.9, 0]}
         args={[14, 14]}
