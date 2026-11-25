@@ -131,6 +131,7 @@ func main() {
 
 	publicGate := sandbox.Gate(server.sandboxEnabled, server.sandboxLimit)
 	router.GET("/health", server.handleHealth)
+	router.GET("/metrics", server.handleMetrics)
 	router.GET("/api/telemetry", server.handleTelemetry)
 	router.GET("/api/sandbox/status", server.handleSandboxStatus)
 	router.GET("/api/services", server.handleServices)

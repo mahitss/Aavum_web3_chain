@@ -55,6 +55,7 @@ Agents can offer and consume APIs. Web3 payment screens still expect a person to
 - **Demo video (YouTube or Loom):** Not recorded.
 - **Live demo site:** Not deployed. Render and Vercel URLs are unset. `scripts/preflight-check.sh` stays red until those URLs, the escrow bytecode, the funded wallets, and a 14-day session all check out.
 - **Agent SDK:** `packages/nexus402-sdk` (`@nexus402/sdk`). `fetch402` is the three-line payment wrapper. Its only runtime dependency is `viem`.
+- **MCP bridge:** `packages/nexus402-mcp` (`npx @nexus402/mcp`). Inspect mode is the default. Auto-pay needs a funded session key. `v1.0.0-dorahacks` is not tagged until `scripts/preflight-check.sh` exits 0.
 
 ## What was verified here
 

@@ -12,6 +12,36 @@
 
 ---
 
+## Judge links
+
+| Item | Link |
+|---|---|
+| Aevum explorer | https://explorer-test.qday.info |
+| tUSD8 token | https://explorer-test.qday.info/address/0x456569838f1d43009A91ebA4263147Afd7233483 |
+| Source | https://github.com/mahitss/Aavum_web3_chain |
+| Live Vercel dashboard | Not deployed. No production URL is recorded. |
+| NexusEscrow on the explorer | Not deployed. `contracts/broadcast/` has no Aevum address to link. |
+| `TaskEscrowLocked`, `TaskCompleted`, `TaskRefunded`, `SessionRevoked` | Not recorded. `docs/BENCHMARK_REPORT.md` has no confirmed hashes. |
+| 3-minute demo video | Not recorded. The shot list is [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md). |
+
+## Connect Claude / Cursor in 10 Seconds (MCP)
+
+`npx @nexus402/mcp` speaks Model Context Protocol to the worker catalog. With no agent key it stays in Inspect mode and returns the HTTP 402 price, chain `44005`, and `taskHash`. With `ORCHESTRATOR_AGENT_PRIVATE_KEY`, `PRINCIPAL_ADDRESS`, and `NEXUS_ESCROW_ADDRESS` it pays through `@nexus402/sdk`. `MAX_PER_TASK_TUSD8` defaults to `1.00`.
+
+```json
+{
+  "mcpServers": {
+    "nexus402": {
+      "command": "npx",
+      "args": ["-y", "@nexus402/mcp"],
+      "env": { "NEXUS_WORKER_URL": "http://127.0.0.1:8080", "MAX_PER_TASK_TUSD8": "1.00" }
+    }
+  }
+}
+```
+
+The same JSON works in Claude Desktop `claude_desktop_config.json` and Cursor `.cursor/mcp.json`. Auto-pay fields and the local `node packages/nexus402-mcp/dist/index.js` command are in [packages/nexus402-mcp/README.md](packages/nexus402-mcp/README.md).
+
 ## Executive Summary
 
 **Nexus402** is a machine-to-machine micro-commerce network. An autonomous client can hire a compute worker and settle in `tUSD8` without a human confirming every payment.

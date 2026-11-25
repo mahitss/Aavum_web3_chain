@@ -304,6 +304,7 @@ export default function HomePage() {
       </header>
 
       <SystemWakeBanner />
+      <LowBalanceBadge sandbox={sandbox} />
 
       {!isConnected ? (
         <section className="rounded-xl border border-emerald/40 bg-card px-4 py-3 text-sm leading-6">
@@ -467,6 +468,30 @@ export default function HomePage() {
         </div>
       </section>
     </main>
+  );
+}
+
+function LowBalanceBadge({ sandbox }: { sandbox: SandboxStatus }) {
+  const notes: string[] = [];
+  if (sandbox.principalTusd8Balance !== undefined) {
+    try {
+      if (BigInt(sandbox.principalTusd8Balance || '0') < 2_000_000n) notes.push('principal tUSD8 is below 2.00');
+    } catch {
+      notes.push('principal tUSD8 balance is unreadable');
+    }
+  }
+  if (sandbox.agentGasBalance !== undefined) {
+    try {
+      if (BigInt(sandbox.agentGasBalance || '0') < 50_000_000_000_000_000n) notes.push('agent tQDAY is below 0.05');
+    } catch {
+      notes.push('agent gas balance is unreadable');
+    }
+  }
+  if (notes.length === 0) return null;
+  return (
+    <p className="rounded-xl border border-amber/50 bg-amber/10 px-4 py-2 text-sm text-amber" role="status">
+      Gas tank low. {notes.join(' and ')} before the next judge run.
+    </p>
   );
 }
 

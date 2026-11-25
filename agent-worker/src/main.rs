@@ -3,6 +3,7 @@ mod compute;
 mod protocol;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
+use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -26,10 +27,21 @@ use std::time::{Duration, Instant};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{error, info, warn, Instrument};
 
+struct Counters {
+    settled: AtomicU64,
+    refunded: AtomicU64,
+    failed: AtomicU64,
+    blocked_cap: AtomicU64,
+    blocked_revoked: AtomicU64,
+    volume_units: AtomicU64,
+    latency_ms: AtomicU64,
+}
+
 struct AppState {
     blockchain: BlockchainClient,
     inflight: RwLock<HashSet<[u8; 32]>>,
     hits: Mutex<HashMap<String, Vec<Instant>>>,
+    counters: Counters,
 }
 
 static REQUEST_IDS: AtomicU64 = AtomicU64::new(1);
@@ -65,6 +77,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         blockchain,
         inflight: RwLock::new(HashSet::new()),
         hits: Mutex::new(HashMap::new()),
+        counters: Counters {
+            settled: AtomicU64::new(0),
+            refunded: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
+            blocked_cap: AtomicU64::new(0),
+            blocked_revoked: AtomicU64::new(0),
+            volume_units: AtomicU64::new(0),
+            latency_ms: AtomicU64::new(0),
+        },
     });
 
     let cors = CorsLayer::new()
@@ -85,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/.well-known/nexus402.json", get(catalog_handler))
         .route("/api/v1/compute", post(compute_handler))
         .layer(cors)
@@ -222,6 +244,30 @@ async fn catalog_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
             {"name": "chain_audit", "price": "0.50", "priceUnits": PRICE_CHAIN_AUDIT.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "0x address"}
         ]
     }))
+}
+
+async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let gas = match state.blockchain.native_balance().await {
+        Ok(wei) => format_tqday(wei),
+        Err(_) => "0.000000".to_string(),
+    };
+    let body = format!(
+        "# HELP nexus402_tasks_total Tasks observed by this process.\n# TYPE nexus402_tasks_total counter\nnexus402_tasks_total{{status=\"settled\"}} {}\nnexus402_tasks_total{{status=\"refunded\"}} {}\nnexus402_tasks_total{{status=\"failed\"}} {}\nnexus402_tasks_total{{status=\"blocked_cap\"}} {}\nnexus402_tasks_total{{status=\"blocked_revoked\"}} {}\n# HELP nexus402_tusd8_volume_units Settled tUSD8 base units.\n# TYPE nexus402_tusd8_volume_units counter\nnexus402_tusd8_volume_units {}\n# HELP nexus402_settlement_latency_ms Most recent settlement latency.\n# TYPE nexus402_settlement_latency_ms gauge\nnexus402_settlement_latency_ms {}\n# HELP nexus402_wallet_gas_balance_tqday Worker tQDAY balance.\n# TYPE nexus402_wallet_gas_balance_tqday gauge\nnexus402_wallet_gas_balance_tqday {}\n",
+        state.counters.settled.load(Ordering::Relaxed),
+        state.counters.refunded.load(Ordering::Relaxed),
+        state.counters.failed.load(Ordering::Relaxed),
+        state.counters.blocked_cap.load(Ordering::Relaxed),
+        state.counters.blocked_revoked.load(Ordering::Relaxed),
+        state.counters.volume_units.load(Ordering::Relaxed),
+        state.counters.latency_ms.load(Ordering::Relaxed),
+        gas
+    );
+    ([(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], body)
+}
+
+fn format_tqday(wei: alloy::primitives::U256) -> String {
+    let micro = (wei / alloy::primitives::U256::from(1_000_000_000_000u64)).to::<u128>();
+    format!("{}.{:06}", micro / 1_000_000, micro % 1_000_000)
 }
 
 async fn health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -387,7 +433,9 @@ async fn compute_handler(
             .into_response();
     }
 
+    let started = Instant::now();
     if simulate_timeout {
+        state.counters.failed.fetch_add(1, Ordering::Relaxed);
         info!("Demo fault armed. Leaving task 0x{task_id_hex} pending for the refund watchdog.");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         return (
@@ -404,6 +452,7 @@ async fn compute_handler(
     let (output, result_hash) = match compute::execute_service(&payload, &state.blockchain).await {
         Ok(result) => result,
         Err(err) => {
+            state.counters.failed.fetch_add(1, Ordering::Relaxed);
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -424,6 +473,7 @@ async fn compute_handler(
     {
         Ok(tx_hash) => tx_hash,
         Err(err) => {
+            state.counters.failed.fetch_add(1, Ordering::Relaxed);
             error!("Failed to claim on-chain payout: {err}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -437,6 +487,12 @@ async fn compute_handler(
     };
 
     info!("Payout claimed! Tx Hash: {claim_tx}");
+    state.counters.settled.fetch_add(1, Ordering::Relaxed);
+    state.counters.volume_units.fetch_add(price, Ordering::Relaxed);
+    state
+        .counters
+        .latency_ms
+        .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
     let response = ComputeResponse {
         status: "COMPLETED".to_string(),
         result: output,

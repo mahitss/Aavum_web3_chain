@@ -193,6 +193,14 @@ impl BlockchainClient {
         Ok(format!("{:#x}", receipt.transaction_hash))
     }
 
+    pub async fn native_balance(&self) -> Result<U256, BlockchainError> {
+        self.contract
+            .provider()
+            .get_balance(self.worker_address)
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))
+    }
+
     pub async fn inspect_address(
         &self,
         target_hex: &str,
