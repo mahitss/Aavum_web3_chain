@@ -1,7 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { isAddress, isHex, type Address, type Hex } from 'viem';
 import { useAccount, useReadContract, useSwitchChain, useWriteContract } from 'wagmi';
@@ -84,6 +84,8 @@ export default function HomePage() {
   const [sandbox, setSandbox] = useState<SandboxStatus>({});
   const [catalog, setCatalog] = useState<CatalogWorker[]>([]);
   const [refundBurst, setRefundBurst] = useState(0);
+  const [historyReady, setHistoryReady] = useState(false);
+  const markHistoryReady = useCallback(() => setHistoryReady(true), []);
   const [localLedger, setLocalLedger] = useState<LedgerRow[]>([]);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
@@ -109,6 +111,7 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    if (!historyReady) return;
     let source: EventSource | null = null;
     let timer: number | undefined;
     let stop = false;
@@ -155,7 +158,7 @@ export default function HomePage() {
       if (timer) window.clearTimeout(timer);
       source?.close();
     };
-  }, []);
+  }, [historyReady]);
 
   useEffect(() => {
     let stop = false;
@@ -460,7 +463,7 @@ export default function HomePage() {
             )}
           </section>
           <OutputInspector job={latestOutput} />
-          <DualTerminal logs={logs} ledger={ledger} live={live} />
+          <DualTerminal logs={logs} ledger={ledger} live={live} onHistoryReady={markHistoryReady} />
         </div>
       </section>
     </main>

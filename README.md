@@ -92,6 +92,18 @@ The longer write-up is [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
 
 ---
 
+## 3-Line SDK Integration
+
+Any Node.js agent can pay a Nexus402 worker with `@nexus402/sdk`. The only runtime dependency is `viem`. `fetch402` returns the original response when the worker does not answer `402`. On a challenge it checks `eip155:44005`, tUSD8, and `maxPerTaskAmount`, locks the escrow, and retries with `PAYMENT-SIGNATURE`.
+
+```ts
+import { createNexusClient } from '@nexus402/sdk';
+const nexus = createNexusClient({ rpcUrl, escrowAddress, principalAddress, agentPrivateKey, maxPerTaskAmount: 1_000_000n });
+const { response, payment } = await nexus.fetch402(workerUrl, { method: 'POST', body: JSON.stringify({ prompt, service: 'web_brief' }) });
+```
+
+The runnable script is `packages/nexus402-sdk/examples/agent-call.ts`. Build and test the package with `npm run build && npm test` inside `packages/nexus402-sdk`.
+
 ## Turnkey Quickstart
 
 ### Prerequisites

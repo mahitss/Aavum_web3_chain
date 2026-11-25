@@ -46,6 +46,7 @@ type Server struct {
 	sandboxLimit   *sandbox.Limiter
 	watchdog       *aevum.Watchdog
 	directory      *discovery.Directory
+	chainLedger    []aevum.ChainLedgerEntry
 }
 
 func main() {
@@ -92,6 +93,17 @@ func main() {
 		watchdog:       aevum.NewWatchdog(aevumClient),
 		directory:      &discovery.Directory{},
 	}
+	hydrateCtx, hydrateCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	chainLedger, hydrateErr := aevumClient.HydrateLedger(hydrateCtx)
+	hydrateCancel()
+	if hydrateErr != nil {
+		log.Printf("On-chain ledger hydration failed: %v", hydrateErr)
+		chainLedger = []aevum.ChainLedgerEntry{}
+	} else {
+		log.Printf("Hydrated %d on-chain escrow events", len(chainLedger))
+	}
+	server.chainLedger = chainLedger
+
 	workerURLs := getEnv("WORKER_URLS", workerURL)
 	refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 8*time.Second)
 	server.directory.Refresh(refreshCtx, workerURLs)
@@ -122,6 +134,7 @@ func main() {
 	router.GET("/api/telemetry", server.handleTelemetry)
 	router.GET("/api/sandbox/status", server.handleSandboxStatus)
 	router.GET("/api/services", server.handleServices)
+	router.GET("/api/ledger/onchain", server.handleOnchainLedger)
 	router.GET("/api/jobs", server.handleGetJobs)
 	router.POST("/api/jobs", publicGate, server.handleCreateJob)
 	router.POST("/api/scenarios/run", publicGate, server.handleScenario)
@@ -407,6 +420,14 @@ func (s *Server) handleScenario(c *gin.Context) {
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "scenario must be happy_path, velocity_attack, kill_switch_test, or worker_timeout_refund"})
 	}
+}
+
+func (s *Server) handleOnchainLedger(c *gin.Context) {
+	events := s.chainLedger
+	if events == nil {
+		events = []aevum.ChainLedgerEntry{}
+	}
+	c.JSON(http.StatusOK, gin.H{"events": events})
 }
 
 func (s *Server) handleServices(c *gin.Context) {

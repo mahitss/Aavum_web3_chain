@@ -53,7 +53,8 @@ Agents can offer and consume APIs. Web3 payment screens still expect a person to
 
 - **GitHub repository:** https://github.com/mahitss/Aavum_web3_chain
 - **Demo video (YouTube or Loom):** Not recorded.
-- **Live demo site:** Not deployed. Render and Vercel URLs are unset.
+- **Live demo site:** Not deployed. Render and Vercel URLs are unset. `scripts/preflight-check.sh` stays red until those URLs, the escrow bytecode, the funded wallets, and a 14-day session all check out.
+- **Agent SDK:** `packages/nexus402-sdk` (`@nexus402/sdk`). `fetch402` is the three-line payment wrapper. Its only runtime dependency is `viem`.
 
 ## What was verified here
 
