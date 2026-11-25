@@ -17,7 +17,10 @@ pub async fn execute_service(
     let service = resolve_service(request)?;
     let output = match service {
         "web_brief" => web_brief(&request.prompt).await?,
-        "chain_audit" => chain_audit(&request.prompt, chain).await?,
+        "chain_audit" | "hop_chain_audit" => chain_audit(&request.prompt, chain).await?,
+        "deep_due_diligence" => {
+            Err("deep_due_diligence is settled by the parent worker".to_string())?
+        }
         _ => ai_synthesis(&request.prompt).await?,
     };
     let encoded = serde_json::to_vec(&output).map_err(|err| err.to_string())?;

@@ -1,6 +1,8 @@
 mod blockchain;
 mod compute;
+mod facilitator;
 mod protocol;
+mod subcontract;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use axum::http::header::CONTENT_TYPE;
@@ -11,13 +13,14 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use blockchain::BlockchainClient;
 use protocol::{
-    calculate_task_hash, decode_header, encode_header, resolve_service, service_price,
-    ComputeRequest, ComputeResponse, PaymentRequired, PaymentRequiredError, PaymentResponseHeader,
-    PaymentSignature, X402Required, DEFAULT_RPC_URL, DEFAULT_TUSD8_ADDRESS, EXPLORER_TX_PREFIX,
-    PAYMENT_REQUIRED, PAYMENT_RESPONSE, PAYMENT_SIGNATURE, PRICE_AI_SYNTHESIS, PRICE_CHAIN_AUDIT,
-    PRICE_WEB_BRIEF, PROTOCOL_VERSION, TASK_TIMEOUT_BLOCKS, X_ESCROW_TASK_ID,
-    X_ESCROW_TASK_ID_LEGACY, X_PAYMENT_AMOUNT, X_PAYMENT_PROTOCOL, X_PAYMENT_RECEIVER,
-    X_PAYMENT_TOKEN, X_TASK_HASH, X_TASK_TIMEOUT_BLOCKS,
+    calculate_task_hash, decode_header, encode_header, hash_bytes, meter_usage, resolve_service,
+    service_price, token_count, ComputeRequest, ComputeResponse, MeteredCall, PaymentRequired,
+    PaymentRequiredError, PaymentResponseHeader, PaymentSignature, Provenance, X402Required,
+    DEFAULT_RPC_URL, DEFAULT_TUSD8_ADDRESS, EXPLORER_TX_PREFIX, HOP_MARGIN, PAYMENT_REQUIRED,
+    PAYMENT_RESPONSE, PAYMENT_SIGNATURE, PRICE_AI_SYNTHESIS, PRICE_CHAIN_AUDIT,
+    PRICE_DEEP_DUE_DILIGENCE, PRICE_UPTO_CEILING, PRICE_WEB_BRIEF, PROTOCOL_VERSION,
+    TASK_TIMEOUT_BLOCKS, X_ESCROW_TASK_ID, X_ESCROW_TASK_ID_LEGACY, X_PAYMENT_AMOUNT,
+    X_PAYMENT_PROTOCOL, X_PAYMENT_RECEIVER, X_PAYMENT_TOKEN, X_TASK_HASH, X_TASK_TIMEOUT_BLOCKS,
 };
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -238,10 +241,12 @@ async fn catalog_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
         "worker": state.blockchain.worker_address().to_string(),
         "network": "eip155:44005",
         "protocol": "x402-v2",
+        "schemes": ["exact", "upto"],
         "services": [
             {"name": "web_brief", "price": "0.15", "priceUnits": PRICE_WEB_BRIEF.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "public https URL"},
-            {"name": "ai_synthesis", "price": "0.25", "priceUnits": PRICE_AI_SYNTHESIS.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "prompt text"},
-            {"name": "chain_audit", "price": "0.50", "priceUnits": PRICE_CHAIN_AUDIT.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "0x address"}
+            {"name": "ai_synthesis", "price": "0.25", "priceUnits": PRICE_AI_SYNTHESIS.to_string(), "schemes": ["exact", "upto"], "uptoUnits": PRICE_UPTO_CEILING.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "prompt text"},
+            {"name": "chain_audit", "price": "0.50", "priceUnits": PRICE_CHAIN_AUDIT.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "0x address"},
+            {"name": "deep_due_diligence", "price": "0.60", "priceUnits": PRICE_DEEP_DUE_DILIGENCE.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "address and optional https URL"}
         ]
     }))
 }
@@ -262,7 +267,10 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
         state.counters.latency_ms.load(Ordering::Relaxed),
         gas
     );
-    ([(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], body)
+    (
+        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
 }
 
 fn format_tqday(wei: alloy::primitives::U256) -> String {
@@ -351,18 +359,41 @@ async fn compute_handler(
             DEFAULT_TUSD8_ADDRESS.parse().unwrap(),
         );
         response_headers.insert(X_PAYMENT_AMOUNT.clone(), price.to_string().parse().unwrap());
-        let challenge = PaymentRequired {
-            scheme: "nexus-escrow-v1".to_string(),
-            network: "eip155:44005".to_string(),
-            asset: DEFAULT_TUSD8_ADDRESS.to_string(),
-            amount: price.to_string(),
-            pay_to: state.blockchain.worker_address().to_string(),
-            task_hash: task_hash_hex.clone(),
-            timeout_blocks,
-        };
+        let pay_to = state.blockchain.worker_address().to_string();
+        let mut accepts = vec![
+            PaymentRequired {
+                scheme: "exact".to_string(),
+                network: "eip155:44005".to_string(),
+                asset: DEFAULT_TUSD8_ADDRESS.to_string(),
+                amount: price.to_string(),
+                pay_to: pay_to.clone(),
+                task_hash: task_hash_hex.clone(),
+                timeout_blocks,
+            },
+            PaymentRequired {
+                scheme: "nexus-escrow-v1".to_string(),
+                network: "eip155:44005".to_string(),
+                asset: DEFAULT_TUSD8_ADDRESS.to_string(),
+                amount: price.to_string(),
+                pay_to: pay_to.clone(),
+                task_hash: task_hash_hex.clone(),
+                timeout_blocks,
+            },
+        ];
+        if service == "ai_synthesis" {
+            accepts.push(PaymentRequired {
+                scheme: "upto".to_string(),
+                network: "eip155:44005".to_string(),
+                asset: DEFAULT_TUSD8_ADDRESS.to_string(),
+                amount: PRICE_UPTO_CEILING.to_string(),
+                pay_to,
+                task_hash: task_hash_hex.clone(),
+                timeout_blocks,
+            });
+        }
         let wire = X402Required {
             x402_version: 2,
-            accepts: vec![challenge],
+            accepts,
         };
         if let Ok(value) = encode_header(&wire).parse() {
             response_headers.insert(PAYMENT_REQUIRED.clone(), value);
@@ -416,12 +447,29 @@ async fn compute_handler(
         id: task_id_bytes,
     };
 
+    let metered = payload.scheme == "upto" && service == "ai_synthesis";
+    let required_units = if metered { PRICE_UPTO_CEILING } else { price };
+    let facilitator_url = std::env::var("FACILITATOR_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     info!("Validating on-chain escrow lock for taskId: 0x{task_id_hex}");
-    if let Err(err) = state
-        .blockchain
-        .verify_escrow(task_id_bytes, task_hash, price)
+    let verification = if let Some(url) = facilitator_url.as_deref() {
+        facilitator::verify_with_facilitator(
+            url,
+            &task_id_hex,
+            &task_hash_hex,
+            required_units,
+            &state.blockchain.worker_address().to_string(),
+        )
         .await
-    {
+    } else {
+        state
+            .blockchain
+            .verify_escrow(task_id_bytes, task_hash, required_units)
+            .await
+    };
+    if let Err(err) = verification {
         error!("Escrow verification failed: {err}");
         return (
             StatusCode::PAYMENT_REQUIRED,
@@ -449,46 +497,205 @@ async fn compute_handler(
     }
 
     info!("Escrow confirmed on Aevum Testnet. Running compute...");
-    let (output, result_hash) = match compute::execute_service(&payload, &state.blockchain).await {
-        Ok(result) => result,
-        Err(err) => {
+    let mut provenance = None;
+    let prompts = if service == "deep_due_diligence" {
+        Vec::new()
+    } else if payload.batch.is_empty() {
+        vec![payload.prompt.clone()]
+    } else {
+        payload.batch.clone()
+    };
+    let mut outputs = Vec::with_capacity(prompts.len().max(1));
+    let mut breakdown = Vec::new();
+    if service == "deep_due_diligence" {
+        let sub_url = std::env::var("SUB_WORKER_URL").unwrap_or_default();
+        let principal_hex = std::env::var("SUB_PRINCIPAL_ADDRESS").unwrap_or_default();
+        if sub_url.trim().is_empty() || principal_hex.trim().is_empty() {
             state.counters.failed.fetch_add(1, Ordering::Relaxed);
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
-                    "error": "compute service failed before claim",
-                    "details": err
+                    "error": "multi-hop subcontracting is not configured",
+                    "details": "Set SUB_WORKER_URL and SUB_PRINCIPAL_ADDRESS. The worker address must already hold a scoped session for that principal."
                 })),
             )
                 .into_response();
         }
+        let principal = match principal_hex.trim().parse() {
+            Ok(address) => address,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": format!("SUB_PRINCIPAL_ADDRESS: {err}")})),
+                )
+                    .into_response();
+            }
+        };
+        match subcontract::hire_children(
+            &state.blockchain,
+            principal,
+            sub_url.trim(),
+            &payload.prompt,
+        )
+        .await
+        {
+            Ok((chain_output, web_output, sub_tasks)) => {
+                provenance = Some(Provenance {
+                    parent_task_id: format!("0x{task_id_hex}"),
+                    parent_amount: PRICE_DEEP_DUE_DILIGENCE.to_string(),
+                    margin: HOP_MARGIN.to_string(),
+                    sub_tasks,
+                });
+                outputs.push(subcontract::synthesize(&chain_output, &web_output));
+            }
+            Err(err) => {
+                state.counters.failed.fetch_add(1, Ordering::Relaxed);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "sub-contract failed before the parent claim",
+                        "details": err
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    for prompt in &prompts {
+        let mut item = payload.clone();
+        item.prompt = prompt.clone();
+        item.batch.clear();
+        match compute::execute_service(&item, &state.blockchain).await {
+            Ok((output, _)) => {
+                if metered {
+                    let amount = meter_usage(&output);
+                    breakdown.push(MeteredCall {
+                        prompt: prompt.clone(),
+                        tokens: token_count(&output),
+                        amount: amount.to_string(),
+                    });
+                }
+                outputs.push(output);
+            }
+            Err(err) => {
+                state.counters.failed.fetch_add(1, Ordering::Relaxed);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "compute service failed before claim",
+                        "details": err
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    let output = if metered {
+        serde_json::to_string(&outputs).unwrap_or_default()
+    } else {
+        outputs.first().cloned().unwrap_or_default()
     };
+    let result_hash = hash_bytes(output.as_bytes());
     let result_hash_hex = format!("0x{}", hex::encode(result_hash));
 
     info!("Submitting cryptographic execution proof to NexusEscrow...");
-    let claim_tx = match state
-        .blockchain
-        .claim_payout(task_id_bytes, result_hash)
-        .await
-    {
-        Ok(tx_hash) => tx_hash,
-        Err(err) => {
-            state.counters.failed.fetch_add(1, Ordering::Relaxed);
-            error!("Failed to claim on-chain payout: {err}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to claim escrow payout on-chain",
-                    "details": err.to_string()
-                })),
+    let (claim_tx, settled_units, ceiling, actual_amount, refunded_change) = if metered {
+        let locked = match state.blockchain.escrow_amount(task_id_bytes).await {
+            Ok(amount) => amount,
+            Err(err) => {
+                state.counters.failed.fetch_add(1, Ordering::Relaxed);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": err.to_string()})),
+                )
+                    .into_response();
+            }
+        };
+        let summed: u64 = breakdown
+            .iter()
+            .filter_map(|call| call.amount.parse::<u64>().ok())
+            .sum();
+        let actual = if locked == 0 {
+            1
+        } else {
+            summed.clamp(1, locked)
+        };
+        let refund = locked.saturating_sub(actual);
+        let claim = if let Some(url) = facilitator_url.as_deref() {
+            facilitator::settle_with_facilitator(
+                &state.blockchain,
+                url,
+                task_id_bytes,
+                result_hash,
+                Some(actual),
             )
-                .into_response();
+            .await
+        } else {
+            state
+                .blockchain
+                .claim_metered(task_id_bytes, actual, result_hash)
+                .await
+        };
+        match claim {
+            Ok(tx_hash) => (
+                tx_hash,
+                actual,
+                Some(locked.to_string()),
+                Some(actual.to_string()),
+                Some(refund.to_string()),
+            ),
+            Err(err) => {
+                state.counters.failed.fetch_add(1, Ordering::Relaxed);
+                error!("Failed to claim metered payout: {err}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Failed to claim escrow payout on-chain",
+                        "details": err.to_string()
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        let claim = if let Some(url) = facilitator_url.as_deref() {
+            facilitator::settle_with_facilitator(
+                &state.blockchain,
+                url,
+                task_id_bytes,
+                result_hash,
+                None,
+            )
+            .await
+        } else {
+            state
+                .blockchain
+                .claim_payout(task_id_bytes, result_hash)
+                .await
+        };
+        match claim {
+            Ok(tx_hash) => (tx_hash, price, None, None, None),
+            Err(err) => {
+                state.counters.failed.fetch_add(1, Ordering::Relaxed);
+                error!("Failed to claim on-chain payout: {err}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Failed to claim escrow payout on-chain",
+                        "details": err.to_string()
+                    })),
+                )
+                    .into_response();
+            }
         }
     };
 
     info!("Payout claimed! Tx Hash: {claim_tx}");
     state.counters.settled.fetch_add(1, Ordering::Relaxed);
-    state.counters.volume_units.fetch_add(price, Ordering::Relaxed);
+    state
+        .counters
+        .volume_units
+        .fetch_add(settled_units, Ordering::Relaxed);
     state
         .counters
         .latency_ms
@@ -500,6 +707,15 @@ async fn compute_handler(
         task_hash: task_hash_hex,
         result_hash: result_hash_hex.clone(),
         claim_tx_hash: claim_tx.clone(),
+        ceiling,
+        actual_amount: actual_amount.clone(),
+        refunded_change: refunded_change.clone(),
+        breakdown: if breakdown.is_empty() {
+            None
+        } else {
+            Some(breakdown)
+        },
+        provenance,
     };
     let mut response = (StatusCode::OK, Json(response)).into_response();
     let settled = PaymentResponseHeader {
@@ -508,6 +724,8 @@ async fn compute_handler(
         claim_tx_hash: claim_tx.clone(),
         result_hash: result_hash_hex.clone(),
         explorer_url: format!("{EXPLORER_TX_PREFIX}{claim_tx}"),
+        actual_amount,
+        refunded_change,
     };
     if let Ok(value) = encode_header(&settled).parse() {
         response

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -91,7 +92,7 @@ func main() {
 		sandboxEnabled: envBool("ENABLE_PUBLIC_SANDBOX"),
 		sandboxLimit:   sandbox.NewLimiter(envPositive("SANDBOX_MAX_JOBS_PER_IP_HOUR", 5), time.Hour),
 		watchdog:       aevum.NewWatchdog(aevumClient),
-		directory:      &discovery.Directory{},
+		directory:      discovery.New(uint64(envPositive("MIN_RELIABILITY_BPS", 8000))),
 	}
 	hydrateCtx, hydrateCancel := context.WithTimeout(context.Background(), 45*time.Second)
 	chainLedger, hydrateErr := aevumClient.HydrateLedger(hydrateCtx)
@@ -418,8 +419,41 @@ func (s *Server) handleScenario(c *gin.Context) {
 	case "worker_timeout_refund":
 		job := s.queueJob("https://example.com", "web_brief", false, true)
 		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
+	case "multi_hop_swarm":
+		workerURL, _ := s.directory.Endpoint("deep_due_diligence")
+		job := &types.TaskJob{
+			ID:        uuid.New().String(),
+			Prompt:    "Audit 0x456569838f1d43009A91ebA4263147Afd7233483 and brief https://explorer-test.qday.info",
+			TaskType:  "deep_due_diligence",
+			Service:   "deep_due_diligence",
+			Status:    "PENDING",
+			CreatedAt: time.Now().UTC(),
+			WorkerURL: workerURL,
+		}
+		s.enqueue(job)
+		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
+	case "metered_batch":
+		prompts := []string{
+			"Name one risk of an unlimited token approval.",
+			"Name one benefit of a one-hour session cap.",
+			"Name one reason a worker should prove execution.",
+		}
+		workerURL, _ := s.directory.Endpoint("ai_synthesis")
+		job := &types.TaskJob{
+			ID:        uuid.New().String(),
+			Prompt:    strings.Join(prompts, "\n"),
+			TaskType:  "ai_synthesis",
+			Service:   "ai_synthesis",
+			Status:    "PENDING",
+			CreatedAt: time.Now().UTC(),
+			Scheme:    "upto",
+			Batch:     prompts,
+			WorkerURL: workerURL,
+		}
+		s.enqueue(job)
+		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "scenario must be happy_path, velocity_attack, kill_switch_test, or worker_timeout_refund"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "scenario must be happy_path, velocity_attack, kill_switch_test, worker_timeout_refund, metered_batch, or multi_hop_swarm"})
 	}
 }
 
@@ -435,6 +469,17 @@ func (s *Server) handleServices(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
 	defer cancel()
 	s.directory.Refresh(ctx, getEnv("WORKER_URLS", getEnv("WORKER_URL", "http://localhost:8080")))
+	for _, worker := range s.directory.List() {
+		if !common.IsHexAddress(worker.Worker) {
+			continue
+		}
+		completed, refunded, volume, bps, err := s.aevumClient.WorkerReputation(ctx, common.HexToAddress(worker.Worker))
+		if err != nil {
+			s.directory.SetReputation(worker.URL, 0, 0, "0", 0, false)
+			continue
+		}
+		s.directory.SetReputation(worker.URL, completed, refunded, volume, bps, true)
+	}
 	c.JSON(http.StatusOK, gin.H{"workers": s.directory.List()})
 }
 
@@ -451,6 +496,11 @@ func (s *Server) queueJob(prompt string, service string, bypass bool, simulate b
 		SimulateTimeout: simulate,
 		WorkerURL:       workerURL,
 	}
+	s.enqueue(job)
+	return job
+}
+
+func (s *Server) enqueue(job *types.TaskJob) {
 	s.jobsMu.Lock()
 	s.jobsHistory = append(s.jobsHistory, job)
 	s.jobsMu.Unlock()
@@ -461,7 +511,6 @@ func (s *Server) queueJob(prompt string, service string, bypass bool, simulate b
 		s.jobsChan <- job
 	}
 	s.acceptMu.Unlock()
-	return job
 }
 
 func (s *Server) runVelocity() {

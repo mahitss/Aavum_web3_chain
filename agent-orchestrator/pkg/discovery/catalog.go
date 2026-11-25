@@ -19,17 +19,27 @@ type Service struct {
 }
 
 type Manifest struct {
-	Worker   string    `json:"worker"`
-	Network  string    `json:"network"`
-	Protocol string    `json:"protocol"`
-	Services []Service `json:"services"`
-	Healthy  bool      `json:"healthy"`
-	URL      string    `json:"url"`
+	Worker             string    `json:"worker"`
+	Network            string    `json:"network"`
+	Protocol           string    `json:"protocol"`
+	Services           []Service `json:"services"`
+	Healthy            bool      `json:"healthy"`
+	URL                string    `json:"url"`
+	TasksCompleted     uint64    `json:"tasksCompleted"`
+	TasksRefunded      uint64    `json:"tasksRefunded"`
+	TotalVolumeSettled string    `json:"totalVolumeSettled"`
+	ReliabilityBps     uint64    `json:"reliabilityBps"`
+	ReputationKnown    bool      `json:"reputationKnown"`
 }
 
 type Directory struct {
 	mu      sync.RWMutex
 	workers []Manifest
+	minBps  uint64
+}
+
+func New(minBps uint64) *Directory {
+	return &Directory{minBps: minBps}
 }
 
 func (d *Directory) Refresh(ctx context.Context, rawURLs string) {
@@ -71,21 +81,57 @@ func (d *Directory) List() []Manifest {
 	return out
 }
 
+func (d *Directory) SetReputation(url string, completed uint64, refunded uint64, volume string, bps uint64, known bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for index := range d.workers {
+		if d.workers[index].URL == url {
+			d.workers[index].TasksCompleted = completed
+			d.workers[index].TasksRefunded = refunded
+			d.workers[index].TotalVolumeSettled = volume
+			d.workers[index].ReliabilityBps = bps
+			d.workers[index].ReputationKnown = known
+		}
+	}
+}
+
 func (d *Directory) Endpoint(service string) (string, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	bestURL := ""
+	bestScore := uint64(0)
+	found := false
 	for _, worker := range d.workers {
-		if !worker.Healthy {
+		if !worker.Healthy || !offers(worker, service) {
 			continue
 		}
-		for _, offered := range worker.Services {
-			if offered.Name == service {
-				return worker.URL, nil
-			}
+		if worker.ReputationKnown && worker.ReliabilityBps < d.minBps {
+			continue
+		}
+		score := uint64(10_000)
+		if worker.ReputationKnown {
+			score = worker.ReliabilityBps
+		}
+		if !found || score > bestScore {
+			bestURL = worker.URL
+			bestScore = score
+			found = true
 		}
 	}
-	if len(d.workers) == 1 && d.workers[0].URL != "" {
+	if found {
+		return bestURL, nil
+	}
+	if len(d.workers) == 1 && d.workers[0].URL != "" && (d.workers[0].ReputationKnown == false || d.workers[0].ReliabilityBps >= d.minBps) {
 		return d.workers[0].URL, nil
 	}
-	return "", fmt.Errorf("no healthy worker offers %s", service)
+	return "", fmt.Errorf("no healthy worker offers %s above %d bps", service, d.minBps)
+}
+
+func offers(worker Manifest, service string) bool {
+	for _, offered := range worker.Services {
+		if offered.Name == service {
+			return true
+		}
+	}
+	return false
 }

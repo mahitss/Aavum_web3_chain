@@ -48,10 +48,30 @@ type OrchestratorJob = {
   blocks_remaining?: number;
   event?: string;
   error?: string;
+  ceiling?: string;
+  actual_amount?: string;
+  refunded_change?: string;
+  breakdown?: string[];
+  provenance?: {
+    parentTaskId?: string;
+    parentAmount?: string;
+    margin?: string;
+    subTasks?: { service: string; taskId?: string; lockTxHash?: string; claimTxHash?: string; amount?: string }[];
+  };
 };
 
 type CatalogService = { name: string; price: string; priceUnits?: string; timeoutBlocks?: number };
-type CatalogWorker = { url?: string; healthy?: boolean; services?: CatalogService[] };
+type CatalogWorker = {
+  url?: string;
+  worker?: string;
+  healthy?: boolean;
+  services?: CatalogService[];
+  tasksCompleted?: number;
+  tasksRefunded?: number;
+  totalVolumeSettled?: string;
+  reliabilityBps?: number;
+  reputationKnown?: boolean;
+};
 
 function asUnits(value: unknown): bigint {
   if (typeof value === 'string' && value.length > 0) return BigInt(value);
@@ -84,6 +104,8 @@ export default function HomePage() {
   const [sandbox, setSandbox] = useState<SandboxStatus>({});
   const [catalog, setCatalog] = useState<CatalogWorker[]>([]);
   const [refundBurst, setRefundBurst] = useState(0);
+  const [meteredBurst, setMeteredBurst] = useState(0);
+  const [hopBurst, setHopBurst] = useState(0);
   const [historyReady, setHistoryReady] = useState(false);
   const markHistoryReady = useCallback(() => setHistoryReady(true), []);
   const [localLedger, setLocalLedger] = useState<LedgerRow[]>([]);
@@ -136,7 +158,11 @@ export default function HomePage() {
           next[index] = { ...current[index], ...job };
           return next;
         });
-        if (job.status === 'ESCROW_LOCKED' || job.status === 'SETTLED') {
+        if (job.event === 'MULTI_HOP_SETTLED') {
+          setHopBurst((count) => count + 1);
+        } else if (job.event === 'TASK_COMPLETED_METERED') {
+          setMeteredBurst((count) => count + 1);
+        } else if (job.status === 'ESCROW_LOCKED' || job.status === 'SETTLED') {
           setBurst((count) => count + 1);
         }
         if (job.status === 'REFUNDED' || job.event === 'TASK_REFUNDED') {
@@ -215,7 +241,7 @@ export default function HomePage() {
   const spendRatio = capEnforced ? 100 : limit > 0n ? Number((spent * 100n) / limit) : 0;
   const sessionActive = Boolean(session.data?.[6]);
   const nextStep = !isConnected
-    ? 'Sandbox mode can run the four judge scenarios without a wallet. Connect MetaMask when you want to sign your own session and use the kill switch.'
+    ? 'Sandbox mode can run the six judge scenarios without a wallet. Connect MetaMask when you want to sign your own session and use the kill switch.'
     : !NEXUS_ESCROW_ADDRESS
       ? 'The escrow address is not set, so approve, register, revoke, and refund stay off.'
       : !agent
@@ -248,7 +274,7 @@ export default function HomePage() {
     }
   }
 
-  async function runScenario(scenario: 'happy_path' | 'velocity_attack' | 'kill_switch_test' | 'worker_timeout_refund') {
+  async function runScenario(scenario: 'happy_path' | 'velocity_attack' | 'kill_switch_test' | 'worker_timeout_refund' | 'metered_batch' | 'multi_hop_swarm') {
     setNotice(`Starting ${scenario}...`);
     try {
       const response = await fetch(`${API_URL}/api/scenarios/run`, {
@@ -340,7 +366,7 @@ export default function HomePage() {
 
       <section className="panel relative h-[420px] overflow-hidden rounded-3xl">
         <MeshBoundary>
-          <MeshCanvas pulse={settledCount + burst} refundPulse={refundBurst} />
+          <MeshCanvas pulse={settledCount + burst} refundPulse={refundBurst} meteredPulse={meteredBurst} hopPulse={hopBurst} />
         </MeshBoundary>
         <div className="pointer-events-none absolute left-4 top-4 space-y-1 font-mono text-xs">
           <p className="text-emerald">Client Orchestrator (Go)</p>
@@ -374,6 +400,7 @@ export default function HomePage() {
                 <option value="web_brief">web_brief · 0.15 tUSD8</option>
                 <option value="ai_synthesis">ai_synthesis · 0.25 tUSD8</option>
                 <option value="chain_audit">chain_audit · 0.50 tUSD8</option>
+                <option value="deep_due_diligence">deep_due_diligence · 0.60 tUSD8</option>
               </select>
             </label>
             <div className="flex flex-wrap gap-2">
@@ -441,6 +468,12 @@ export default function HomePage() {
               <button type="button" onClick={() => runScenario('worker_timeout_refund')} className="rounded-lg border border-cyan/50 px-3 py-2 text-left text-sm">
                 Simulate Worker Crash & Auto-Refund
               </button>
+              <button type="button" onClick={() => runScenario('metered_batch')} className="rounded-lg border border-emerald/50 px-3 py-2 text-left text-sm">
+                Metered upto Batch (Pay-Per-Token)
+              </button>
+              <button type="button" onClick={() => runScenario('multi_hop_swarm')} className="rounded-lg border border-cyan/50 px-3 py-2 text-left text-sm">
+                Multi-Hop A2A Supply Chain
+              </button>
             </div>
             <p className="text-xs text-slate-500">Revoke the agent key first, then Test Kill Switch. The chain must answer SessionInactive.</p>
           </section>
@@ -464,10 +497,90 @@ export default function HomePage() {
             )}
           </section>
           <OutputInspector job={latestOutput} />
-          <DualTerminal logs={logs} ledger={ledger} live={live} onHistoryReady={markHistoryReady} />
+          <MeteredReceipt job={[...jobs].reverse().find((job) => job.actual_amount) || null} />
+          <ProvenanceTree job={[...jobs].reverse().find((job) => job.provenance) || null} />
+          <ReputationBoard workers={catalog} />
+          <DualTerminal logs={logs} ledger={ledger} live={live} onHistoryReady={markHistoryReady} receipt={[...jobs].reverse().find((job) => job.actual_amount) || null} />
         </div>
       </section>
     </main>
+  );
+}
+
+function MeteredReceipt({ job }: { job: OrchestratorJob | null }) {
+  if (!job?.actual_amount) return null;
+  return (
+    <section className="panel rounded-2xl border border-emerald/40 p-5">
+      <h2 className="text-lg font-medium">Metered Settlement Receipt</h2>
+      <dl className="mt-3 space-y-1 text-sm">
+        <div>Authorized max ceiling {job.ceiling ? `${tusd(job.ceiling)} tUSD8` : '0.50 tUSD8'}</div>
+        <div>Actual compute consumed {tusd(job.actual_amount)} tUSD8</div>
+        <div>Instant on-chain change refunded {tusd(job.refunded_change)} tUSD8</div>
+      </dl>
+      <p className="mt-3 inline-block rounded-full border border-emerald/50 px-2 py-1 text-xs text-emerald">66% fewer locks than 3 separate escrows</p>
+      {job.claim_tx_hash ? (
+        <a className="mt-3 block text-sm text-cyan underline-offset-2 hover:underline" href={explorerTx(job.claim_tx_hash)} target="_blank" rel="noreferrer">
+          Open TaskCompletedMetered
+        </a>
+      ) : null}
+    </section>
+  );
+}
+
+function ProvenanceTree({ job }: { job: OrchestratorJob | null }) {
+  if (!job?.provenance) return null;
+  const tree = job.provenance;
+  return (
+    <section className="panel rounded-2xl border border-cyan/40 p-5">
+      <h2 className="text-lg font-medium">Provenance Receipt Tree</h2>
+      <p className="mt-2 text-sm">Parent settlement {tusd(tree.parentAmount)} tUSD8 · margin {tusd(tree.margin)} tUSD8</p>
+      {job.claim_tx_hash ? (
+        <a className="mt-1 block text-sm text-cyan underline-offset-2 hover:underline" href={explorerTx(job.claim_tx_hash)} target="_blank" rel="noreferrer">
+          Parent claim {shortHash(job.claim_tx_hash)}
+        </a>
+      ) : null}
+      {job.lock_tx_hash ? (
+        <a className="block text-sm text-cyan underline-offset-2 hover:underline" href={explorerTx(job.lock_tx_hash)} target="_blank" rel="noreferrer">
+          Parent lock {shortHash(job.lock_tx_hash)}
+        </a>
+      ) : null}
+      <ul className="mt-3 space-y-2 text-sm">
+        {(tree.subTasks || []).map((hop) => (
+          <li key={`${hop.service}-${hop.taskId}`} className="rounded-lg border border-line px-3 py-2">
+            <div>{hop.service} · {tusd(hop.amount)} tUSD8</div>
+            {hop.lockTxHash ? <a className="block text-cyan underline-offset-2 hover:underline" href={explorerTx(hop.lockTxHash)} target="_blank" rel="noreferrer">Lock {shortHash(hop.lockTxHash)}</a> : null}
+            {hop.claimTxHash ? <a className="block text-cyan underline-offset-2 hover:underline" href={explorerTx(hop.claimTxHash)} target="_blank" rel="noreferrer">Claim {shortHash(hop.claimTxHash)}</a> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ReputationBoard({ workers }: { workers: CatalogWorker[] }) {
+  return (
+    <section className="panel rounded-2xl p-5">
+      <h2 className="text-lg font-medium">Worker Reputation Leaderboard</h2>
+      {workers.length === 0 ? (
+        <p className="mt-2 text-sm text-slate-400">No workers discovered yet.</p>
+      ) : (
+        <ul className="mt-3 space-y-2 text-sm">
+          {workers.map((worker) => (
+            <li key={worker.url || worker.worker} className="rounded-lg border border-line px-3 py-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-mono text-xs">{worker.worker ? shortHash(worker.worker) : worker.url}</span>
+                <span className="rounded-full border border-emerald/50 px-2 py-1 text-xs text-emerald">
+                  {worker.reputationKnown ? `${((worker.reliabilityBps || 0) / 100).toFixed(2)}% SLA` : 'unrated'}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-slate-400">
+                completed {worker.tasksCompleted || 0} · refunded {worker.tasksRefunded || 0} · volume {tusd(worker.totalVolumeSettled)} tUSD8
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -548,6 +661,9 @@ function OutputInspector({ job }: { job: OrchestratorJob | null }) {
           <a className="text-cyan underline-offset-2 hover:underline" href={explorerTx(job.refund_tx_hash)} target="_blank" rel="noreferrer">
             TaskRefunded
           </a>
+        ) : null}
+        {job?.actual_amount ? (
+          <span className="text-emerald">Metered {tusd(job.actual_amount)} of {tusd(job.ceiling)} tUSD8, change {tusd(job.refunded_change)}</span>
         ) : null}
       </div>
     </section>

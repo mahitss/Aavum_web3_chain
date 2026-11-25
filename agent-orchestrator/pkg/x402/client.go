@@ -52,10 +52,12 @@ func (c *Client) Spent() *big.Int {
 func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	service := canonicalService(job)
 	reqBody, err := json.Marshal(struct {
-		Prompt          string `json:"prompt"`
-		Service         string `json:"service"`
-		SimulateTimeout bool   `json:"simulate_timeout,omitempty"`
-	}{Prompt: job.Prompt, Service: service, SimulateTimeout: job.SimulateTimeout})
+		Prompt          string   `json:"prompt"`
+		Service         string   `json:"service"`
+		SimulateTimeout bool     `json:"simulate_timeout,omitempty"`
+		Scheme          string   `json:"scheme,omitempty"`
+		Batch           []string `json:"batch,omitempty"`
+	}{Prompt: job.Prompt, Service: service, SimulateTimeout: job.SimulateTimeout, Scheme: job.Scheme, Batch: job.Batch})
 	if err != nil {
 		return fmt.Errorf("failed to serialize payload: %w", err)
 	}
@@ -84,7 +86,7 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 
 	job.Status = "402_CHALLENGED"
 	c.notify(job)
-	challenge, err := parsePaymentHeaders(resp.Header)
+	challenge, err := parsePaymentHeaders(resp.Header, job.Scheme)
 	if err != nil {
 		return fmt.Errorf("invalid 402 challenge headers: %w", err)
 	}
@@ -147,10 +149,19 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	}
 
 	var computeResp struct {
-		Status      string `json:"status"`
-		Result      string `json:"result"`
-		ResultHash  string `json:"result_hash"`
-		ClaimTxHash string `json:"claim_tx_hash"`
+		Status         string `json:"status"`
+		Result         string `json:"result"`
+		ResultHash     string `json:"result_hash"`
+		ClaimTxHash    string `json:"claim_tx_hash"`
+		Ceiling        string `json:"ceiling"`
+		ActualAmount   string `json:"actualAmount"`
+		RefundedChange string `json:"refundedChange"`
+		Breakdown      []struct {
+			Prompt string `json:"prompt"`
+			Tokens uint64 `json:"tokens"`
+			Amount string `json:"amount"`
+		} `json:"breakdown"`
+		Provenance *types.Provenance `json:"provenance"`
 	}
 	if err := json.Unmarshal(bodyBytes, &computeResp); err != nil {
 		return fmt.Errorf("invalid compute response: %w", err)
@@ -160,6 +171,21 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	job.Result = computeResp.Result
 	job.ResultHash = computeResp.ResultHash
 	job.ClaimTxHash = computeResp.ClaimTxHash
+	job.Ceiling = computeResp.Ceiling
+	job.ActualAmount = computeResp.ActualAmount
+	job.RefundedChange = computeResp.RefundedChange
+	for _, call := range computeResp.Breakdown {
+		job.Breakdown = append(job.Breakdown, fmt.Sprintf("%s · %d tokens · %s", call.Prompt, call.Tokens, call.Amount))
+	}
+	job.Provenance = computeResp.Provenance
+	if job.Provenance != nil {
+		job.Event = "MULTI_HOP_SETTLED"
+	} else if job.ActualAmount != "" {
+		job.Event = "TASK_COMPLETED_METERED"
+		if calls := len(job.Batch); calls > 1 {
+			job.GasSaved = fmt.Sprintf("%d%% fewer locks than %d separate escrows", (calls-1)*100/calls, calls)
+		}
+	}
 	job.SettledAt = time.Now()
 	c.notify(job)
 	return nil
@@ -200,16 +226,16 @@ func canonicalService(job *types.TaskJob) string {
 		raw = job.TaskType
 	}
 	switch raw {
-	case "web_brief", "chain_audit", "ai_synthesis":
+	case "web_brief", "chain_audit", "ai_synthesis", "deep_due_diligence":
 		return raw
 	default:
 		return "ai_synthesis"
 	}
 }
 
-func parsePaymentHeaders(h http.Header) (*types.PaymentChallenge, error) {
+func parsePaymentHeaders(h http.Header, prefer string) (*types.PaymentChallenge, error) {
 	if encoded := h.Get("PAYMENT-REQUIRED"); encoded != "" {
-		return parsePaymentRequired(encoded)
+		return parsePaymentRequired(encoded, prefer)
 	}
 	proto := h.Get("X-Payment-Protocol")
 	if proto != "Nexus402-v1" {
@@ -259,28 +285,50 @@ func parsePaymentHeaders(h http.Header) (*types.PaymentChallenge, error) {
 	}, nil
 }
 
-func parsePaymentRequired(encoded string) (*types.PaymentChallenge, error) {
+type paymentAccept struct {
+	Scheme        string `json:"scheme"`
+	Network       string `json:"network"`
+	Asset         string `json:"asset"`
+	Amount        string `json:"amount"`
+	PayTo         string `json:"payTo"`
+	TaskHash      string `json:"taskHash"`
+	TimeoutBlocks uint64 `json:"timeoutBlocks"`
+}
+
+func chooseAccept(accepts []paymentAccept, prefer string) (paymentAccept, error) {
+	if prefer == "upto" {
+		for _, accept := range accepts {
+			if accept.Scheme == "upto" {
+				return accept, nil
+			}
+		}
+		return paymentAccept{}, fmt.Errorf("worker did not offer an upto scheme")
+	}
+	for _, accept := range accepts {
+		if accept.Scheme == "exact" || accept.Scheme == "nexus-escrow-v1" {
+			return accept, nil
+		}
+	}
+	if len(accepts) == 0 {
+		return paymentAccept{}, fmt.Errorf("worker offered no payment schemes")
+	}
+	return accepts[0], nil
+}
+
+func parsePaymentRequired(encoded string, prefer string) (*types.PaymentChallenge, error) {
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("invalid PAYMENT-REQUIRED encoding: %w", err)
 	}
 	var envelope struct {
-		X402Version int `json:"x402Version"`
-		Accepts     []struct {
-			Scheme        string `json:"scheme"`
-			Network       string `json:"network"`
-			Asset         string `json:"asset"`
-			Amount        string `json:"amount"`
-			PayTo         string `json:"payTo"`
-			TaskHash      string `json:"taskHash"`
-			TimeoutBlocks uint64 `json:"timeoutBlocks"`
-		} `json:"accepts"`
-		Scheme        string `json:"scheme"`
-		Asset         string `json:"asset"`
-		Amount        string `json:"amount"`
-		PayTo         string `json:"payTo"`
-		TaskHash      string `json:"taskHash"`
-		TimeoutBlocks uint64 `json:"timeoutBlocks"`
+		X402Version   int             `json:"x402Version"`
+		Accepts       []paymentAccept `json:"accepts"`
+		Scheme        string          `json:"scheme"`
+		Asset         string          `json:"asset"`
+		Amount        string          `json:"amount"`
+		PayTo         string          `json:"payTo"`
+		TaskHash      string          `json:"taskHash"`
+		TimeoutBlocks uint64          `json:"timeoutBlocks"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, fmt.Errorf("invalid PAYMENT-REQUIRED body: %w", err)
@@ -297,7 +345,10 @@ func parsePaymentRequired(encoded string) (*types.PaymentChallenge, error) {
 		if envelope.X402Version != 2 {
 			return nil, fmt.Errorf("unsupported x402Version %d", envelope.X402Version)
 		}
-		accepted := envelope.Accepts[0]
+		accepted, err := chooseAccept(envelope.Accepts, prefer)
+		if err != nil {
+			return nil, err
+		}
 		if accepted.Network != "" && accepted.Network != "eip155:44005" {
 			return nil, fmt.Errorf("unsupported network %s", accepted.Network)
 		}
@@ -308,7 +359,9 @@ func parsePaymentRequired(encoded string) (*types.PaymentChallenge, error) {
 		challenge.TaskHash = accepted.TaskHash
 		challenge.TimeoutBlocks = accepted.TimeoutBlocks
 	}
-	if challenge.Scheme != "nexus-escrow-v1" {
+	switch challenge.Scheme {
+	case "exact", "upto", "nexus-escrow-v1":
+	default:
 		return nil, fmt.Errorf("unsupported scheme: %s", challenge.Scheme)
 	}
 	if !common.IsHexAddress(challenge.Asset) || !common.IsHexAddress(challenge.PayTo) {

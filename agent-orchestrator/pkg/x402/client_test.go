@@ -19,7 +19,7 @@ func TestParsePaymentHeaders(t *testing.T) {
 	header.Set("X-Task-Hash", "0x0101010101010101010101010101010101010101010101010101010101010101")
 	header.Set("X-Task-Timeout-Blocks", "50")
 
-	challenge, err := parsePaymentHeaders(header)
+	challenge, err := parsePaymentHeaders(header, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestParsePaymentRequiredV2(t *testing.T) {
 	payload := []byte(`{"x402Version":2,"accepts":[{"scheme":"nexus-escrow-v1","network":"eip155:44005","asset":"0x456569838f1d43009A91ebA4263147Afd7233483","amount":"150000","payTo":"0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266","taskHash":"0x0101010101010101010101010101010101010101010101010101010101010101","timeoutBlocks":50}]}`)
 	header := make(http.Header)
 	header.Set("PAYMENT-REQUIRED", base64Encode(payload))
-	challenge, err := parsePaymentHeaders(header)
+	challenge, err := parsePaymentHeaders(header, "")
 	if err != nil {
 		t.Fatal(err)
 	}

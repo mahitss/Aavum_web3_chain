@@ -37,6 +37,21 @@ sol! {
             bytes32 resultHash,
             bytes calldata workerSignature
         ) external;
+
+        function completeTaskMetered(
+            bytes32 taskId,
+            uint256 actualAmount,
+            bytes32 resultHash,
+            bytes calldata workerSignature
+        ) external;
+
+        function lockTaskEscrow(
+            address principal,
+            address worker,
+            uint256 amount,
+            uint256 durationBlocks,
+            bytes32 taskHash
+        ) external returns (bytes32 taskId);
     }
 
     #[sol(rpc)]
@@ -193,6 +208,135 @@ impl BlockchainClient {
         Ok(format!("{:#x}", receipt.transaction_hash))
     }
 
+    pub async fn escrow_amount(&self, task_id_bytes: [u8; 32]) -> Result<u64, BlockchainError> {
+        let returned = self
+            .contract
+            .getTask(B256::from(task_id_bytes))
+            .call()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        returned
+            ._0
+            .amount
+            .try_into()
+            .map_err(|_| BlockchainError::RpcError("escrow amount overflows u64".into()))
+    }
+
+    pub async fn claim_metered(
+        &self,
+        task_id_bytes: [u8; 32],
+        actual_amount: u64,
+        result_hash_bytes: [u8; 32],
+    ) -> Result<String, BlockchainError> {
+        let mut hasher = Keccak256::new();
+        hasher.update(task_id_bytes);
+        hasher.update(U256::from(actual_amount).to_be_bytes::<32>());
+        hasher.update(result_hash_bytes);
+        let raw_digest: [u8; 32] = hasher.finalize().into();
+        let signature = self
+            .signer
+            .sign_message(&raw_digest)
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let mut signature_bytes = signature.as_bytes();
+        if signature_bytes[64] < 27 {
+            signature_bytes[64] += 27;
+        }
+        let call = self.contract.completeTaskMetered(
+            B256::from(task_id_bytes),
+            U256::from(actual_amount),
+            B256::from(result_hash_bytes),
+            Bytes::from(signature_bytes.to_vec()),
+        );
+        let pending_tx = call
+            .send()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let receipt = pending_tx
+            .with_required_confirmations(1)
+            .get_receipt()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        Ok(format!("{:#x}", receipt.transaction_hash))
+    }
+
+    pub async fn sign_completion(
+        &self,
+        task_id_bytes: [u8; 32],
+        result_hash_bytes: [u8; 32],
+    ) -> Result<Vec<u8>, BlockchainError> {
+        self.sign_packed(&[task_id_bytes.as_slice(), result_hash_bytes.as_slice()])
+            .await
+    }
+
+    pub async fn sign_metered_completion(
+        &self,
+        task_id_bytes: [u8; 32],
+        actual_amount: u64,
+        result_hash_bytes: [u8; 32],
+    ) -> Result<Vec<u8>, BlockchainError> {
+        let amount = U256::from(actual_amount).to_be_bytes::<32>();
+        self.sign_packed(&[
+            task_id_bytes.as_slice(),
+            amount.as_slice(),
+            result_hash_bytes.as_slice(),
+        ])
+        .await
+    }
+
+    async fn sign_packed(&self, parts: &[&[u8]]) -> Result<Vec<u8>, BlockchainError> {
+        let mut hasher = Keccak256::new();
+        for part in parts {
+            hasher.update(part);
+        }
+        let raw_digest: [u8; 32] = hasher.finalize().into();
+        let signature = self
+            .signer
+            .sign_message(&raw_digest)
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let mut signature_bytes = signature.as_bytes();
+        if signature_bytes[64] < 27 {
+            signature_bytes[64] += 27;
+        }
+        Ok(signature_bytes.to_vec())
+    }
+
+    pub async fn lock_escrow(
+        &self,
+        principal: Address,
+        worker: Address,
+        amount: u64,
+        task_hash: [u8; 32],
+    ) -> Result<([u8; 32], String), BlockchainError> {
+        let call = self.contract.lockTaskEscrow(
+            principal,
+            worker,
+            U256::from(amount),
+            U256::from(crate::protocol::TASK_TIMEOUT_BLOCKS),
+            B256::from(task_hash),
+        );
+        let pending_tx = call
+            .send()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let receipt = pending_tx
+            .with_required_confirmations(1)
+            .get_receipt()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let topic = locked_topic();
+        for log in receipt.inner.logs() {
+            let topics = log.topics();
+            if topics.first() == Some(&topic) && topics.len() > 1 {
+                return Ok((topics[1].0, format!("{:#x}", receipt.transaction_hash)));
+            }
+        }
+        Err(BlockchainError::RpcError(
+            "TaskEscrowLocked event missing".into(),
+        ))
+    }
+
     pub async fn native_balance(&self) -> Result<U256, BlockchainError> {
         self.contract
             .provider()
@@ -239,4 +383,10 @@ impl BlockchainClient {
             "nonce": nonce,
         }))
     }
+}
+
+fn locked_topic() -> B256 {
+    let mut hasher = Keccak256::new();
+    hasher.update(b"TaskEscrowLocked(bytes32,address,address,uint256,uint256)");
+    B256::from(<[u8; 32]>::from(hasher.finalize()))
 }

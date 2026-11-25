@@ -20,6 +20,14 @@ struct SessionConfig {
     bool isActive;
 }
 
+/// @notice Immutable SLA counters for one worker address.
+struct WorkerStats {
+    uint256 tasksCompleted;
+    uint256 tasksRefunded;
+    uint256 totalVolumeSettled;
+    uint256 lastActiveBlock;
+}
+
 /// @notice Funds locked for one unit of agent work, settled in tUSD8 base units (1e6).
 struct TaskEscrow {
     bytes32 taskId;

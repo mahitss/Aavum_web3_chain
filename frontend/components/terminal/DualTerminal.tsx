@@ -27,11 +27,13 @@ export function DualTerminal({
   ledger,
   live = false,
   onHistoryReady,
+  receipt = null,
 }: {
   logs: string[];
   ledger: LedgerRow[];
   live?: boolean;
   onHistoryReady?: () => void;
+  receipt?: { ceiling?: string; actual_amount?: string; refunded_change?: string; claim_tx_hash?: string; breakdown?: string[] } | null;
 }) {
   const stream = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState<'stream' | 'ledger' | null>(null);
@@ -88,6 +90,21 @@ export function DualTerminal({
           {logs.length ? logs.join('\n') : 'No tasks yet. A dispatch shows the 402 challenge here.'}
         </pre>
       </section>
+      {receipt?.actual_amount ? (
+        <section className="term rounded-2xl border border-emerald/40 p-4 text-sm">
+          <h2 className="text-lg font-medium">Metered Settlement Receipt</h2>
+          <p className="mt-2">Authorized max ceiling {receipt.ceiling ? `${tusd(receipt.ceiling)} tUSD8` : '0.50 tUSD8'}</p>
+          <p>Actual compute consumed {tusd(receipt.actual_amount)} tUSD8</p>
+          <p>Instant on-chain change refunded {tusd(receipt.refunded_change)} tUSD8</p>
+          <p className="mt-2 inline-block rounded-full border border-emerald/50 px-2 py-1 text-xs text-emerald">66% fewer locks than 3 separate escrows</p>
+          {receipt.breakdown?.length ? <p className="mt-2 font-mono text-xs text-slate-400">{receipt.breakdown.join(' · ')}</p> : null}
+          {receipt.claim_tx_hash ? (
+            <a className="mt-2 block text-cyan underline-offset-2 hover:underline" href={explorerTx(receipt.claim_tx_hash)} target="_blank" rel="noreferrer">
+              TaskCompletedMetered
+            </a>
+          ) : null}
+        </section>
+      ) : null}
       <section className="term rounded-2xl border border-line p-4">
         <header className="mb-3 flex items-center justify-between text-sm text-slate-300">
           <span>Verifiable Aevum Testnet Ledger</span>

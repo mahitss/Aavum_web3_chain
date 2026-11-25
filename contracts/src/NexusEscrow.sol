@@ -9,7 +9,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {INexusEscrow} from "./interfaces/INexusEscrow.sol";
-import {EscrowStatus, SessionConfig, TaskEscrow} from "./types/NexusTypes.sol";
+import {EscrowStatus, SessionConfig, TaskEscrow, WorkerStats} from "./types/NexusTypes.sol";
 
 /// @title NexusEscrow
 /// @notice Escrow and session-key settlement for Nexus402 on QDay Aevum.
@@ -29,6 +29,7 @@ contract NexusEscrow is INexusEscrow, EIP712, ReentrancyGuard {
     mapping(address => uint256) public nonces;
     mapping(bytes32 => TaskEscrow) private _tasks;
     mapping(address => mapping(address => uint256)) private _taskNonces;
+    mapping(address => WorkerStats) public workerStats;
 
     constructor(address tusd8_) EIP712("Nexus402 Protocol", "1") {
         require(tusd8_ != address(0), "NexusEscrow: token");
@@ -131,9 +132,47 @@ contract NexusEscrow is INexusEscrow, EIP712, ReentrancyGuard {
         address worker = task.worker;
         task.resultHash = resultHash;
         task.status = EscrowStatus.COMPLETED;
+        _recordCompletion(worker, amount);
 
         paymentToken.safeTransfer(worker, amount);
         emit TaskCompleted(taskId, worker, resultHash, amount);
+    }
+
+    /// @inheritdoc INexusEscrow
+    function completeTaskMetered(
+        bytes32 taskId,
+        uint256 actualAmount,
+        bytes32 resultHash,
+        bytes calldata workerSignature
+    ) external nonReentrant {
+        TaskEscrow storage task = _tasks[taskId];
+        if (task.status == EscrowStatus.NONE) revert TaskNotFound();
+        if (task.status != EscrowStatus.PENDING) revert TaskNotPending();
+        if (actualAmount == 0 || actualAmount > task.amount) revert ExceedsEscrowAmount();
+
+        bytes32 digest =
+            MessageHashUtils.toEthSignedMessageHash(keccak256(abi.encodePacked(taskId, actualAmount, resultHash)));
+        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, workerSignature);
+        if (err != ECDSA.RecoverError.NoError || signer != task.worker) revert InvalidProofSignature();
+
+        uint256 unusedRefund = task.amount - actualAmount;
+        address worker = task.worker;
+        address principal = task.principal;
+        address agentKey = task.agentKey;
+        task.resultHash = resultHash;
+        task.status = EscrowStatus.COMPLETED;
+        _recordCompletion(worker, actualAmount);
+
+        paymentToken.safeTransfer(worker, actualAmount);
+        if (unusedRefund > 0) {
+            paymentToken.safeTransfer(principal, unusedRefund);
+            SessionConfig storage session = _sessions[principal][agentKey];
+            uint256 window = block.timestamp / 3600;
+            if (window == session.currentWindow && session.spentInWindow >= unusedRefund) {
+                session.spentInWindow -= unusedRefund;
+            }
+        }
+        emit TaskCompletedMetered(taskId, worker, resultHash, actualAmount, unusedRefund);
     }
 
     /// @inheritdoc INexusEscrow
@@ -145,7 +184,9 @@ contract NexusEscrow is INexusEscrow, EIP712, ReentrancyGuard {
 
         uint256 amount = task.amount;
         address principal = task.principal;
+        address worker = task.worker;
         task.status = EscrowStatus.REFUNDED;
+        _recordRefund(worker);
 
         paymentToken.safeTransfer(principal, amount);
         emit TaskRefunded(taskId, principal, amount);
@@ -167,6 +208,30 @@ contract NexusEscrow is INexusEscrow, EIP712, ReentrancyGuard {
     /// @inheritdoc INexusEscrow
     function getTask(bytes32 taskId) external view returns (TaskEscrow memory) {
         return _tasks[taskId];
+    }
+
+    /// @inheritdoc INexusEscrow
+    function getWorkerReputation(address worker)
+        external
+        view
+        returns (WorkerStats memory stats, uint256 reliabilityBps)
+    {
+        stats = workerStats[worker];
+        uint256 terminal = stats.tasksCompleted + stats.tasksRefunded;
+        reliabilityBps = terminal == 0 ? 10_000 : (stats.tasksCompleted * 10_000) / terminal;
+    }
+
+    function _recordCompletion(address worker, uint256 volume) internal {
+        WorkerStats storage stats = workerStats[worker];
+        stats.tasksCompleted += 1;
+        stats.totalVolumeSettled += volume;
+        stats.lastActiveBlock = block.number;
+    }
+
+    function _recordRefund(address worker) internal {
+        WorkerStats storage stats = workerStats[worker];
+        stats.tasksRefunded += 1;
+        stats.lastActiveBlock = block.number;
     }
 
     function domainSeparator() external view returns (bytes32) {
