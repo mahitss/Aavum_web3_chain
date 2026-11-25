@@ -62,7 +62,16 @@ pub struct PaymentSignature {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct X402Required {
+    #[serde(rename = "x402Version")]
+    pub x402_version: u8,
+    pub accepts: Vec<PaymentRequired>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentResponseHeader {
+    #[serde(rename = "x402Version")]
+    pub x402_version: u8,
     pub status: String,
     #[serde(rename = "claimTxHash")]
     pub claim_tx_hash: String,

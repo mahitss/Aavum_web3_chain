@@ -15,6 +15,9 @@ agent-orchestrator/orchestrator.exe
 contracts/out/
 contracts/cache/
 contracts/broadcast/
+**/*broadcast/
+*.pem
+*.key
 
 .DS_Store
 *.log

@@ -11,6 +11,7 @@ services:
       WORKER_PRIVATE_KEY: ${WORKER_PRIVATE_KEY}
       NEXUS_ESCROW_ADDRESS: ${NEXUS_ESCROW_ADDRESS}
       WORKER_PORT: 8080
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
     networks:
       - nexus402-network
     healthcheck:
@@ -39,6 +40,9 @@ services:
       ORCHESTRATOR_PORT: 8081
       PER_TASK_LIMIT: ${PER_TASK_LIMIT:-1000000}
       HOURLY_LIMIT: ${HOURLY_LIMIT:-10000000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      ENABLE_PUBLIC_SANDBOX: ${ENABLE_PUBLIC_SANDBOX:-false}
+      SANDBOX_MAX_JOBS_PER_IP_HOUR: ${SANDBOX_MAX_JOBS_PER_IP_HOUR:-5}
     networks:
       - nexus402-network
     depends_on:

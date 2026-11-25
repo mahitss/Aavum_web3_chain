@@ -10,12 +10,21 @@ import { MeshBoundary } from '@/components/3d/MeshBoundary';
 import { EmergencyPanic } from '@/components/controls/EmergencyPanic';
 import { SessionDelegator } from '@/components/controls/SessionDelegator';
 import { DualTerminal, type LedgerRow } from '@/components/terminal/DualTerminal';
+import { SystemWakeBanner } from '@/components/ui/SystemWakeBanner';
 import { API_URL, erc20Abi, NEXUS_ESCROW_ADDRESS, nexusEscrowAbi, TUSD8_ADDRESS } from '@/lib/contracts';
 import { shortHash, tusd } from '@/lib/format';
 
 const MeshCanvas = dynamic(() => import('@/components/3d/MeshCanvas').then((mod) => mod.MeshCanvas), {
   ssr: false,
 });
+
+type SandboxStatus = {
+  sandboxEnabled?: boolean;
+  remainingIpQuota?: number;
+  principalTusd8Balance?: string;
+  agentGasBalance?: string;
+  sessionActive?: boolean;
+};
 
 type Telemetry = {
   hourly_spent?: string | number;
@@ -66,6 +75,7 @@ export default function HomePage() {
   const [jobs, setJobs] = useState<OrchestratorJob[]>([]);
   const [burst, setBurst] = useState(0);
   const [live, setLive] = useState(false);
+  const [sandbox, setSandbox] = useState<SandboxStatus>({});
   const [localLedger, setLocalLedger] = useState<LedgerRow[]>([]);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
@@ -140,6 +150,8 @@ export default function HomePage() {
     let stop = false;
     async function poll() {
       try {
+        const sandboxResponse = await fetch(`${API_URL}/api/sandbox/status`);
+        if (sandboxResponse.ok && !stop) setSandbox((await sandboxResponse.json()) as SandboxStatus);
         const response = await fetch(`${API_URL}/api/telemetry`);
         if (!response.ok) return;
         const body = (await response.json()) as Telemetry;
@@ -183,7 +195,7 @@ export default function HomePage() {
   const spendRatio = capEnforced ? 100 : limit > 0n ? Number((spent * 100n) / limit) : 0;
   const sessionActive = Boolean(session.data?.[6]);
   const nextStep = !isConnected
-    ? 'Connect the principal wallet. It must be on QDay Aevum, chain 44005.'
+    ? 'Sandbox mode can run the three judge scenarios without a wallet. Connect MetaMask when you want to sign your own session and use the kill switch.'
     : !NEXUS_ESCROW_ADDRESS
       ? 'The escrow address is not set, so approve, register, revoke, and refund stay off.'
       : !agent
@@ -271,6 +283,17 @@ export default function HomePage() {
         </div>
       </header>
 
+      <SystemWakeBanner />
+
+      {!isConnected ? (
+        <section className="rounded-xl border border-emerald/40 bg-card px-4 py-3 text-sm leading-6">
+          <p>Sandbox Mode Active — Trigger real QDay Aevum Testnet settlements immediately without a wallet.</p>
+          <p className="mt-2 font-mono text-xs text-slate-400">
+            {sandbox.sandboxEnabled ? 'Public sandbox enabled' : 'Public sandbox is off on this server'} · quota {sandbox.remainingIpQuota ?? '—'} · principal tUSD8 {tusd(sandbox.principalTusd8Balance)} · agent gas {sandbox.agentGasBalance ?? '—'} · session {sandbox.sessionActive ? 'active' : 'inactive'}
+          </p>
+        </section>
+      ) : null}
+
       {isConnected && chainId !== aevumTestnet.id ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber/40 bg-card px-4 py-3" role="alert">
           <p className="text-sm">Switch to QDay Aevum Testnet #44005 before signing or paying.</p>
@@ -288,7 +311,7 @@ export default function HomePage() {
       <p className="rounded-xl border border-line bg-card px-4 py-3 text-sm leading-6">{nextStep}</p>
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Metric label="tUSD8 balance" value={isConnected ? `${tusd(principalBalance.data)}` : 'Connect wallet'} />
+        <Metric label="tUSD8 balance" value={isConnected ? `${tusd(principalBalance.data)}` : tusd(sandbox.principalTusd8Balance)} />
         <Metric label="Hourly spend" value={telemetry.connected ? `${tusd(spent)} / ${tusd(limit)}` : 'Orchestrator offline'} />
         <Metric label="Session time left" value={session.isLoading ? 'Loading session' : ttl} mono />
         <Metric label="Settled tasks" value={String(settledCount)} />
@@ -308,7 +331,13 @@ export default function HomePage() {
 
       <section className="grid items-start gap-5 lg:grid-cols-2">
         <div className="space-y-4">
-          <SessionDelegator agentKey={agentKey} onAgentKey={setAgentKey} onSession={(hash) => remember('Session Grant', hash)} />
+          {isConnected ? (
+            <SessionDelegator agentKey={agentKey} onAgentKey={setAgentKey} onSession={(hash) => remember('Session Grant', hash)} />
+          ) : (
+            <section className="panel rounded-2xl p-5 text-sm text-slate-400">
+              Connect a wallet for Full Operator Mode. That unlocks the EIP-712 session, the tUSD8 approval, and the emergency kill switch.
+            </section>
+          )}
           <form onSubmit={dispatch} className="panel space-y-3 rounded-2xl p-5">
             <div>
               <p className="text-sm text-slate-400">Step 2</p>
@@ -343,7 +372,7 @@ export default function HomePage() {
             <p className="text-sm text-slate-300">{notice || 'Refund stays off until a task id exists and is not settled.'}</p>
             {refundWrite.error ? <p className="text-sm text-panic">{refundWrite.error.message}</p> : null}
           </form>
-          <EmergencyPanic agentKey={agentKey} killed={killed} onKilled={(hash) => remember('Revocation', hash)} />
+          {isConnected ? <EmergencyPanic agentKey={agentKey} killed={killed} onKilled={(hash) => remember('Revocation', hash)} /> : null}
         </div>
         <div className="space-y-4">
           <section className="panel rounded-2xl p-5">

@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: nexus402-worker
+    env: docker
+    plan: free
+    dockerfilePath: ./agent-worker/Dockerfile
+    dockerContext: ./agent-worker
+    healthCheckPath: /health
+    envVars:
+      - key: AEVUM_RPC_URL
+        value: https://rpc-test.qday.info
+      - key: NEXUS_ESCROW_ADDRESS
+        sync: false
+      - key: WORKER_PRIVATE_KEY
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: WORKER_PORT
+        value: "8080"
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+  - type: web
+    name: nexus402-orchestrator
+    env: docker
+    plan: free
+    dockerfilePath: ./agent-orchestrator/Dockerfile
+    dockerContext: ./agent-orchestrator
+    healthCheckPath: /health
+    envVars:
+      - key: AEVUM_RPC_URL
+        value: https://rpc-test.qday.info
+      - key: NEXUS_ESCROW_ADDRESS
+        sync: false
+      - key: PRINCIPAL_ADDRESS
+        sync: false
+      - key: ORCHESTRATOR_AGENT_PRIVATE_KEY
+        sync: false
+      - key: WORKER_URL
+        fromService:
+          type: web
+          name: nexus402-worker
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: ENABLE_PUBLIC_SANDBOX
+        value: "true"
+      - key: SANDBOX_MAX_JOBS_PER_IP_HOUR
+        value: "5"
+      - key: ORCHESTRATOR_PORT
+        value: "8081"

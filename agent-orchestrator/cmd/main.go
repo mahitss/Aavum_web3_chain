@@ -20,23 +20,28 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/nexus402/agent-orchestrator/pkg/aevum"
+	"github.com/nexus402/agent-orchestrator/pkg/sandbox"
 	"github.com/nexus402/agent-orchestrator/pkg/types"
 	"github.com/nexus402/agent-orchestrator/pkg/x402"
 )
 
+var sseHeartbeat = 15 * time.Second
+
 type Server struct {
-	aevumClient *aevum.Client
-	x402Client  *x402.Client
-	jobsChan    chan *types.TaskJob
-	jobsMu      sync.RWMutex
-	jobsHistory []*types.TaskJob
-	hourlySpent *big.Int
-	hourlyLimit *big.Int
-	perTaskCap  *big.Int
-	events      *eventHub
-	stop        chan struct{}
-	acceptMu    sync.Mutex
-	workers     sync.WaitGroup
+	aevumClient    *aevum.Client
+	x402Client     *x402.Client
+	jobsChan       chan *types.TaskJob
+	jobsMu         sync.RWMutex
+	jobsHistory    []*types.TaskJob
+	hourlySpent    *big.Int
+	hourlyLimit    *big.Int
+	perTaskCap     *big.Int
+	events         *eventHub
+	stop           chan struct{}
+	acceptMu       sync.Mutex
+	workers        sync.WaitGroup
+	sandboxEnabled bool
+	sandboxLimit   *sandbox.Limiter
 }
 
 func main() {
@@ -69,15 +74,17 @@ func main() {
 	x402Client := x402.NewClient(workerURL, aevumClient, perTaskLimit, hourlyLimit)
 
 	server := &Server{
-		aevumClient: aevumClient,
-		x402Client:  x402Client,
-		jobsChan:    make(chan *types.TaskJob, 100),
-		events:      newEventHub(),
-		stop:        make(chan struct{}),
-		jobsHistory: make([]*types.TaskJob, 0),
-		hourlySpent: big.NewInt(0),
-		hourlyLimit: hourlyLimit,
-		perTaskCap:  perTaskLimit,
+		aevumClient:    aevumClient,
+		x402Client:     x402Client,
+		jobsChan:       make(chan *types.TaskJob, 100),
+		events:         newEventHub(),
+		stop:           make(chan struct{}),
+		jobsHistory:    make([]*types.TaskJob, 0),
+		hourlySpent:    big.NewInt(0),
+		hourlyLimit:    hourlyLimit,
+		perTaskCap:     perTaskLimit,
+		sandboxEnabled: envBool("ENABLE_PUBLIC_SANDBOX"),
+		sandboxLimit:   sandbox.NewLimiter(envPositive("SANDBOX_MAX_JOBS_PER_IP_HOUR", 5), time.Hour),
 	}
 
 	for i := 1; i <= 4; i++ {
@@ -88,18 +95,21 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 	router.Use(cors.New(cors.Config{
-		AllowOrigins:  []string{"*"},
-		AllowMethods:  []string{"GET", "POST", "OPTIONS"},
-		AllowHeaders:  []string{"Origin", "Content-Type", "Accept"},
-		ExposeHeaders: []string{"Content-Length"},
-		MaxAge:        12 * time.Hour,
+		AllowOrigins:     allowedOrigins(),
+		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: false,
+		MaxAge:           12 * time.Hour,
 	}))
 
+	publicGate := sandbox.Gate(server.sandboxEnabled, server.sandboxLimit)
 	router.GET("/health", server.handleHealth)
 	router.GET("/api/telemetry", server.handleTelemetry)
+	router.GET("/api/sandbox/status", server.handleSandboxStatus)
 	router.GET("/api/jobs", server.handleGetJobs)
-	router.POST("/api/jobs", server.handleCreateJob)
-	router.POST("/api/scenarios/run", server.handleScenario)
+	router.POST("/api/jobs", publicGate, server.handleCreateJob)
+	router.POST("/api/scenarios/run", publicGate, server.handleScenario)
 	router.GET("/api/events", server.handleEvents)
 	x402Client.Notify = server.publishJob
 
@@ -375,19 +385,27 @@ func (s *Server) handleEvents(c *gin.Context) {
 	c.Status(http.StatusOK)
 	fmt.Fprintf(c.Writer, ": connected\n\n")
 	flusher.Flush()
+	streamEvents(c.Request.Context(), c.Writer, flusher.Flush, sub, s.stop, sseHeartbeat)
+}
 
+func streamEvents(ctx context.Context, w http.ResponseWriter, flush func(), events <-chan string, stop <-chan struct{}, heartbeat time.Duration) {
+	ticker := time.NewTicker(heartbeat)
+	defer ticker.Stop()
 	for {
 		select {
-		case <-c.Request.Context().Done():
+		case <-ctx.Done():
 			return
-		case <-s.stop:
+		case <-stop:
 			return
-		case payload, open := <-sub:
+		case <-ticker.C:
+			fmt.Fprintf(w, ": ping\n\n")
+			flush()
+		case payload, open := <-events:
 			if !open {
 				return
 			}
-			fmt.Fprintf(c.Writer, "data: %s\n\n", payload)
-			flusher.Flush()
+			fmt.Fprintf(w, "data: %s\n\n", payload)
+			flush()
 		}
 	}
 }
@@ -431,6 +449,65 @@ func (h *eventHub) broadcast(job *types.TaskJob) {
 		default:
 		}
 	}
+}
+
+func (s *Server) handleSandboxStatus(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+	balances, err := s.aevumClient.SandboxBalances(ctx)
+	body := gin.H{
+		"sandboxEnabled":        s.sandboxEnabled,
+		"remainingIpQuota":      s.sandboxLimit.Remaining(sandbox.ClientKey(c)),
+		"principalTusd8Balance": "0",
+		"agentGasBalance":       "0",
+		"sessionActive":         false,
+	}
+	if err != nil {
+		body["rpcError"] = err.Error()
+		c.JSON(http.StatusOK, body)
+		return
+	}
+	body["principalTusd8Balance"] = balances.PrincipalTusd8
+	body["agentGasBalance"] = balances.AgentGas
+	body["sessionActive"] = balances.SessionActive
+	c.JSON(http.StatusOK, body)
+}
+
+func allowedOrigins() []string {
+	raw := getEnv("ALLOWED_ORIGINS", "http://localhost:3000")
+	parts := strings.Split(raw, ",")
+	origins := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" && part != "*" {
+			origins = append(origins, part)
+		}
+	}
+	if len(origins) == 0 {
+		return []string{"http://localhost:3000"}
+	}
+	return origins
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func envPositive(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < 1 {
+		return fallback
+	}
+	return parsed
 }
 
 func getEnv(key, fallback string) string {

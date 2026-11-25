@@ -12,17 +12,17 @@ use blockchain::BlockchainClient;
 use protocol::{
     calculate_task_hash, decode_header, encode_header, resolve_service, service_price,
     ComputeRequest, ComputeResponse, PaymentRequired, PaymentRequiredError, PaymentResponseHeader,
-    PaymentSignature, DEFAULT_RPC_URL, DEFAULT_TUSD8_ADDRESS, EXPLORER_TX_PREFIX, PAYMENT_REQUIRED,
-    PAYMENT_RESPONSE, PAYMENT_SIGNATURE, PROTOCOL_VERSION, TASK_TIMEOUT_BLOCKS, X_ESCROW_TASK_ID,
-    X_ESCROW_TASK_ID_LEGACY, X_PAYMENT_AMOUNT, X_PAYMENT_PROTOCOL, X_PAYMENT_RECEIVER,
-    X_PAYMENT_TOKEN, X_TASK_HASH, X_TASK_TIMEOUT_BLOCKS,
+    PaymentSignature, X402Required, DEFAULT_RPC_URL, DEFAULT_TUSD8_ADDRESS, EXPLORER_TX_PREFIX,
+    PAYMENT_REQUIRED, PAYMENT_RESPONSE, PAYMENT_SIGNATURE, PROTOCOL_VERSION, TASK_TIMEOUT_BLOCKS,
+    X_ESCROW_TASK_ID, X_ESCROW_TASK_ID_LEGACY, X_PAYMENT_AMOUNT, X_PAYMENT_PROTOCOL,
+    X_PAYMENT_RECEIVER, X_PAYMENT_TOKEN, X_TASK_HASH, X_TASK_TIMEOUT_BLOCKS,
 };
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{error, info, warn, Instrument};
 
 struct AppState {
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::list(allowed_origins()))
         .allow_methods(Any)
         .allow_headers(Any)
         .expose_headers([
@@ -102,6 +102,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_graceful_shutdown(shutdown_signal())
     .await?;
     Ok(())
+}
+
+fn allowed_origins() -> Vec<HeaderValue> {
+    let raw =
+        std::env::var("ALLOWED_ORIGINS").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let mut origins = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() || part == "*" {
+            continue;
+        }
+        if let Ok(value) = HeaderValue::from_str(part) {
+            origins.push(value);
+        }
+    }
+    if origins.is_empty() {
+        origins.push(HeaderValue::from_static("http://localhost:3000"));
+    }
+    origins
 }
 
 async fn request_id(request: Request, next: Next) -> Response {
@@ -266,7 +285,11 @@ async fn compute_handler(
             task_hash: task_hash_hex.clone(),
             timeout_blocks: TASK_TIMEOUT_BLOCKS,
         };
-        if let Ok(value) = encode_header(&challenge).parse() {
+        let wire = X402Required {
+            x402_version: 2,
+            accepts: vec![challenge],
+        };
+        if let Ok(value) = encode_header(&wire).parse() {
             response_headers.insert(PAYMENT_REQUIRED.clone(), value);
         }
         response_headers.insert(
@@ -382,6 +405,7 @@ async fn compute_handler(
     };
     let mut response = (StatusCode::OK, Json(response)).into_response();
     let settled = PaymentResponseHeader {
+        x402_version: 2,
         status: "settled".to_string(),
         claim_tx_hash: claim_tx.clone(),
         result_hash: result_hash_hex.clone(),

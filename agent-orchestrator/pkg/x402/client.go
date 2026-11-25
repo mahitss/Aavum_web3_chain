@@ -117,11 +117,12 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	retryReq.Header.Set("Content-Type", "application/json")
 	retryReq.Header.Set("X-Escrow-TaskId", job.TaskId)
 	retryReq.Header.Set("X-Escrow-TxHash", job.LockTxHash)
-	signature, err := json.Marshal(map[string]string{
-		"taskId":     job.TaskId,
-		"lockTxHash": job.LockTxHash,
-		"agentKey":   c.aevumClient.AgentAddress().Hex(),
-		"principal":  c.aevumClient.PrincipalAddress().Hex(),
+	signature, err := json.Marshal(map[string]any{
+		"x402Version": 2,
+		"taskId":      job.TaskId,
+		"lockTxHash":  job.LockTxHash,
+		"agentKey":    c.aevumClient.AgentAddress().Hex(),
+		"principal":   c.aevumClient.PrincipalAddress().Hex(),
 	})
 	if err != nil {
 		return err
@@ -257,7 +258,17 @@ func parsePaymentRequired(encoded string) (*types.PaymentChallenge, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid PAYMENT-REQUIRED encoding: %w", err)
 	}
-	var challenge struct {
+	var envelope struct {
+		X402Version int `json:"x402Version"`
+		Accepts     []struct {
+			Scheme        string `json:"scheme"`
+			Network       string `json:"network"`
+			Asset         string `json:"asset"`
+			Amount        string `json:"amount"`
+			PayTo         string `json:"payTo"`
+			TaskHash      string `json:"taskHash"`
+			TimeoutBlocks uint64 `json:"timeoutBlocks"`
+		} `json:"accepts"`
 		Scheme        string `json:"scheme"`
 		Asset         string `json:"asset"`
 		Amount        string `json:"amount"`
@@ -265,8 +276,31 @@ func parsePaymentRequired(encoded string) (*types.PaymentChallenge, error) {
 		TaskHash      string `json:"taskHash"`
 		TimeoutBlocks uint64 `json:"timeoutBlocks"`
 	}
-	if err := json.Unmarshal(raw, &challenge); err != nil {
+	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, fmt.Errorf("invalid PAYMENT-REQUIRED body: %w", err)
+	}
+	challenge := struct {
+		Scheme        string
+		Asset         string
+		Amount        string
+		PayTo         string
+		TaskHash      string
+		TimeoutBlocks uint64
+	}{envelope.Scheme, envelope.Asset, envelope.Amount, envelope.PayTo, envelope.TaskHash, envelope.TimeoutBlocks}
+	if len(envelope.Accepts) > 0 {
+		if envelope.X402Version != 2 {
+			return nil, fmt.Errorf("unsupported x402Version %d", envelope.X402Version)
+		}
+		accepted := envelope.Accepts[0]
+		if accepted.Network != "" && accepted.Network != "eip155:44005" {
+			return nil, fmt.Errorf("unsupported network %s", accepted.Network)
+		}
+		challenge.Scheme = accepted.Scheme
+		challenge.Asset = accepted.Asset
+		challenge.Amount = accepted.Amount
+		challenge.PayTo = accepted.PayTo
+		challenge.TaskHash = accepted.TaskHash
+		challenge.TimeoutBlocks = accepted.TimeoutBlocks
 	}
 	if challenge.Scheme != "nexus-escrow-v1" {
 		return nil, fmt.Errorf("unsupported scheme: %s", challenge.Scheme)
