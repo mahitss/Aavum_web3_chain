@@ -6,7 +6,10 @@ enum EscrowStatus {
     NONE,
     PENDING,
     COMPLETED,
-    REFUNDED
+    REFUNDED,
+    SUBMITTED,
+    DISPUTED,
+    REJECTED
 }
 
 /// @notice Scoped spending authority delegated from a principal to an ephemeral agent key.
@@ -28,6 +31,34 @@ struct WorkerStats {
     uint256 lastActiveBlock;
 }
 
+/// @notice One deposited session tab redeemed by off-chain EIP-712 vouchers.
+struct SessionTab {
+    bytes32 tabId;
+    address principal;
+    address agentKey;
+    address worker;
+    uint256 depositAmount;
+    uint256 deadline;
+    uint256 lastSettledNonce;
+    bool open;
+}
+
+/// @notice Off-chain voucher. `cumulativeAmount` is the running total, not the increment.
+struct PaymentVoucher {
+    bytes32 tabId;
+    uint256 cumulativeAmount;
+    uint256 nonce;
+    uint256 validBefore;
+}
+
+/// @notice Shared treasury ceiling for every agent key a principal has delegated.
+struct OrgVault {
+    uint256 globalHourlyLimit;
+    uint256 globalCurrentWindow;
+    uint256 globalSpentInWindow;
+    bool globalPaused;
+}
+
 /// @notice Funds locked for one unit of agent work, settled in tUSD8 base units (1e6).
 struct TaskEscrow {
     bytes32 taskId;
@@ -39,4 +70,6 @@ struct TaskEscrow {
     bytes32 taskHash;
     bytes32 resultHash;
     EscrowStatus status;
+    address evaluator;
+    uint256 challengeWindowBlocks;
 }

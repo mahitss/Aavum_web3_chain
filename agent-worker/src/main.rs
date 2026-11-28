@@ -3,6 +3,7 @@ mod compute;
 mod facilitator;
 mod protocol;
 mod subcontract;
+mod voucher;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use axum::http::header::CONTENT_TYPE;
@@ -40,11 +41,12 @@ struct Counters {
     latency_ms: AtomicU64,
 }
 
-struct AppState {
+pub struct AppState {
     blockchain: BlockchainClient,
     inflight: RwLock<HashSet<[u8; 32]>>,
     hits: Mutex<HashMap<String, Vec<Instant>>>,
     counters: Counters,
+    pub tabs: voucher::TabBook,
 }
 
 static REQUEST_IDS: AtomicU64 = AtomicU64::new(1);
@@ -89,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             volume_units: AtomicU64::new(0),
             latency_ms: AtomicU64::new(0),
         },
+        tabs: Mutex::new(HashMap::new()),
     });
 
     let cors = CorsLayer::new()
@@ -112,6 +115,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/metrics", get(metrics_handler))
         .route("/.well-known/nexus402.json", get(catalog_handler))
         .route("/api/v1/compute", post(compute_handler))
+        .route(
+            "/api/v1/tabs/{tab_id}/settle",
+            post(voucher::settle_handler),
+        )
         .layer(cors)
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
@@ -241,12 +248,13 @@ async fn catalog_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
         "worker": state.blockchain.worker_address().to_string(),
         "network": "eip155:44005",
         "protocol": "x402-v2",
-        "schemes": ["exact", "upto"],
+        "schemes": ["exact", "upto", "batch-settlement", "auth-capture"],
         "services": [
             {"name": "web_brief", "price": "0.15", "priceUnits": PRICE_WEB_BRIEF.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "public https URL"},
             {"name": "ai_synthesis", "price": "0.25", "priceUnits": PRICE_AI_SYNTHESIS.to_string(), "schemes": ["exact", "upto"], "uptoUnits": PRICE_UPTO_CEILING.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "prompt text"},
             {"name": "chain_audit", "price": "0.50", "priceUnits": PRICE_CHAIN_AUDIT.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "0x address"},
-            {"name": "deep_due_diligence", "price": "0.60", "priceUnits": PRICE_DEEP_DUE_DILIGENCE.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "address and optional https URL"}
+            {"name": "deep_due_diligence", "price": "0.60", "priceUnits": PRICE_DEEP_DUE_DILIGENCE.to_string(), "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "address and optional https URL"},
+            {"name": "micro_call", "price": "0.05", "priceUnits": crate::protocol::PRICE_MICRO_CALL.to_string(), "schemes": ["batch-settlement"], "timeoutBlocks": TASK_TIMEOUT_BLOCKS, "input": "short text"}
         ]
     }))
 }
@@ -310,6 +318,12 @@ async fn compute_handler(
         .map(|value| matches!(value, "1" | "true" | "TRUE"))
         .unwrap_or(false);
     let simulate_timeout = faults && (payload.simulate_timeout || header_fault);
+    let header_garbage = headers
+        .get("x-simulate-garbage")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| matches!(value, "1" | "true" | "TRUE"))
+        .unwrap_or(false);
+    let simulate_garbage = faults && (payload.simulate_garbage || header_garbage);
     let timeout_blocks = if simulate_timeout {
         5
     } else {
@@ -335,6 +349,20 @@ async fn compute_handler(
         })
         .map(|value| value.trim().trim_start_matches("0x").to_string())
         .filter(|value| !value.is_empty());
+
+    if signed
+        .as_ref()
+        .is_some_and(|payment| payment.scheme == "batch-settlement")
+    {
+        return voucher::accept(
+            state,
+            &headers,
+            &payload,
+            service,
+            signed.as_ref().expect("batch signature"),
+        )
+        .await;
+    }
 
     let Some(task_id_hex) = escrow_task_id else {
         warn!(
@@ -380,6 +408,24 @@ async fn compute_handler(
                 timeout_blocks,
             },
         ];
+        accepts.push(PaymentRequired {
+            scheme: "auth-capture".to_string(),
+            network: "eip155:44005".to_string(),
+            asset: DEFAULT_TUSD8_ADDRESS.to_string(),
+            amount: price.to_string(),
+            pay_to: pay_to.clone(),
+            task_hash: task_hash_hex.clone(),
+            timeout_blocks,
+        });
+        accepts.push(PaymentRequired {
+            scheme: "batch-settlement".to_string(),
+            network: "eip155:44005".to_string(),
+            asset: DEFAULT_TUSD8_ADDRESS.to_string(),
+            amount: price.to_string(),
+            pay_to: pay_to.clone(),
+            task_hash: task_hash_hex.clone(),
+            timeout_blocks,
+        });
         if service == "ai_synthesis" {
             accepts.push(PaymentRequired {
                 scheme: "upto".to_string(),
@@ -507,7 +553,9 @@ async fn compute_handler(
     };
     let mut outputs = Vec::with_capacity(prompts.len().max(1));
     let mut breakdown = Vec::new();
-    if service == "deep_due_diligence" {
+    if simulate_garbage {
+        outputs.push(String::new());
+    } else if service == "deep_due_diligence" {
         let sub_url = std::env::var("SUB_WORKER_URL").unwrap_or_default();
         let principal_hex = std::env::var("SUB_PRINCIPAL_ADDRESS").unwrap_or_default();
         if sub_url.trim().is_empty() || principal_hex.trim().is_empty() {
@@ -561,42 +609,91 @@ async fn compute_handler(
             }
         }
     }
-    for prompt in &prompts {
-        let mut item = payload.clone();
-        item.prompt = prompt.clone();
-        item.batch.clear();
-        match compute::execute_service(&item, &state.blockchain).await {
-            Ok((output, _)) => {
-                if metered {
-                    let amount = meter_usage(&output);
-                    breakdown.push(MeteredCall {
-                        prompt: prompt.clone(),
-                        tokens: token_count(&output),
-                        amount: amount.to_string(),
-                    });
+    if !simulate_garbage {
+        for prompt in &prompts {
+            let mut item = payload.clone();
+            item.prompt = prompt.clone();
+            item.batch.clear();
+            match compute::execute_service(&item, &state.blockchain).await {
+                Ok((output, _)) => {
+                    if metered {
+                        let amount = meter_usage(&output);
+                        breakdown.push(MeteredCall {
+                            prompt: prompt.clone(),
+                            tokens: token_count(&output),
+                            amount: amount.to_string(),
+                        });
+                    }
+                    outputs.push(output);
                 }
-                outputs.push(output);
-            }
-            Err(err) => {
-                state.counters.failed.fetch_add(1, Ordering::Relaxed);
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "error": "compute service failed before claim",
-                        "details": err
-                    })),
-                )
-                    .into_response();
+                Err(err) => {
+                    state.counters.failed.fetch_add(1, Ordering::Relaxed);
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": "compute service failed before claim",
+                            "details": err
+                        })),
+                    )
+                        .into_response();
+                }
             }
         }
     }
-    let output = if metered {
+    let output = if simulate_garbage {
+        "GARBAGE::{not-json".to_string()
+    } else if metered {
         serde_json::to_string(&outputs).unwrap_or_default()
     } else {
         outputs.first().cloned().unwrap_or_default()
     };
     let result_hash = hash_bytes(output.as_bytes());
     let result_hash_hex = format!("0x{}", hex::encode(result_hash));
+    let evaluated = payload.scheme == "auth-capture"
+        || signed
+            .as_ref()
+            .is_some_and(|payment| payment.scheme == "auth-capture");
+    if evaluated {
+        info!("Submitting work for evaluator review on taskId: 0x{task_id_hex}");
+        match state
+            .blockchain
+            .submit_for_evaluation(task_id_bytes, result_hash)
+            .await
+        {
+            Ok(submit_tx) => {
+                state
+                    .counters
+                    .latency_ms
+                    .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                let response = ComputeResponse {
+                    status: "SUBMITTED_FOR_EVALUATION".to_string(),
+                    result: output,
+                    task_id: format!("0x{task_id_hex}"),
+                    task_hash: task_hash_hex,
+                    result_hash: result_hash_hex,
+                    claim_tx_hash: submit_tx,
+                    ceiling: None,
+                    actual_amount: None,
+                    refunded_change: None,
+                    breakdown: None,
+                    provenance: None,
+                };
+                return (StatusCode::OK, Json(response)).into_response();
+            }
+            Err(err) => {
+                state.counters.failed.fetch_add(1, Ordering::Relaxed);
+                error!("Failed to submit work for evaluation: {err}");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "submitWorkForEvaluation failed",
+                        "details": err.to_string()
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     info!("Submitting cryptographic execution proof to NexusEscrow...");
     let (claim_tx, settled_units, ceiling, actual_amount, refunded_change) = if metered {

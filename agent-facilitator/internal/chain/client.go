@@ -28,7 +28,9 @@ const escrowABI = `[
 		{"name":"deadline","type":"uint256"},
 		{"name":"taskHash","type":"bytes32"},
 		{"name":"resultHash","type":"bytes32"},
-		{"name":"status","type":"uint8"}
+		{"name":"status","type":"uint8"},
+		{"name":"evaluator","type":"address"},
+		{"name":"challengeWindowBlocks","type":"uint256"}
 	]}]},
 	{"name":"completeTaskWithProof","type":"function","stateMutability":"nonpayable","inputs":[
 		{"name":"taskId","type":"bytes32"},
@@ -44,15 +46,17 @@ const escrowABI = `[
 ]`
 
 type onchainTask struct {
-	TaskId     [32]byte
-	Principal  common.Address
-	AgentKey   common.Address
-	Worker     common.Address
-	Amount     *big.Int
-	Deadline   *big.Int
-	TaskHash   [32]byte
-	ResultHash [32]byte
-	Status     uint8
+	TaskId                [32]byte
+	Principal             common.Address
+	AgentKey              common.Address
+	Worker                common.Address
+	Amount                *big.Int
+	Deadline              *big.Int
+	TaskHash              [32]byte
+	ResultHash            [32]byte
+	Status                uint8
+	Evaluator             common.Address
+	ChallengeWindowBlocks *big.Int
 }
 
 type Client struct {

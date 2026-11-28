@@ -21,6 +21,10 @@ pub async fn execute_service(
         "deep_due_diligence" => {
             Err("deep_due_diligence is settled by the parent worker".to_string())?
         }
+        "micro_call" => json!({
+            "service": "micro_call",
+            "echo": request.prompt
+        }),
         _ => ai_synthesis(&request.prompt).await?,
     };
     let encoded = serde_json::to_vec(&output).map_err(|err| err.to_string())?;

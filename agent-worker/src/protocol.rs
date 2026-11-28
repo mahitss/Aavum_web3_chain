@@ -25,6 +25,7 @@ pub const PRICE_CHAIN_AUDIT: u64 = 500_000;
 pub const PRICE_HOP_CHAIN: u64 = 250_000;
 pub const PRICE_DEEP_DUE_DILIGENCE: u64 = 600_000;
 pub const HOP_MARGIN: u64 = 200_000;
+pub const PRICE_MICRO_CALL: u64 = 50_000;
 pub const PRICE_UPTO_CEILING: u64 = 500_000;
 pub const METER_BASE_UNITS: u64 = 50_000;
 pub const METER_PER_TOKEN: u64 = 200;
@@ -42,6 +43,8 @@ pub struct ComputeRequest {
     pub task_type: String,
     #[serde(default)]
     pub simulate_timeout: bool,
+    #[serde(default)]
+    pub simulate_garbage: bool,
     #[serde(default)]
     pub scheme: String,
     #[serde(default)]
@@ -62,15 +65,28 @@ pub struct PaymentRequired {
     pub timeout_blocks: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PaymentSignature {
-    #[serde(rename = "taskId")]
+    #[serde(rename = "taskId", default)]
     pub task_id: String,
-    #[serde(rename = "lockTxHash")]
+    #[serde(rename = "lockTxHash", default)]
     pub lock_tx_hash: String,
-    #[serde(rename = "agentKey")]
+    #[serde(rename = "agentKey", default)]
     pub agent_key: String,
+    #[serde(default)]
     pub principal: String,
+    #[serde(default)]
+    pub scheme: String,
+    #[serde(rename = "tabId", default)]
+    pub tab_id: String,
+    #[serde(rename = "cumulativeAmount", default)]
+    pub cumulative_amount: String,
+    #[serde(default)]
+    pub nonce: u64,
+    #[serde(rename = "validBefore", default)]
+    pub valid_before: u64,
+    #[serde(rename = "agentSignature", default)]
+    pub agent_signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +183,7 @@ pub fn resolve_service(payload: &ComputeRequest) -> Result<&'static str, String>
         "chain_audit" => Ok("chain_audit"),
         "hop_chain_audit" => Ok("hop_chain_audit"),
         "deep_due_diligence" => Ok("deep_due_diligence"),
+        "micro_call" => Ok("micro_call"),
         "ai_synthesis" | "hash" | "inference" | "" => Ok("ai_synthesis"),
         other => Err(format!("unknown service: {other}")),
     }
@@ -189,6 +206,7 @@ pub fn service_price(service: &str) -> u64 {
         "chain_audit" => PRICE_CHAIN_AUDIT,
         "hop_chain_audit" => PRICE_HOP_CHAIN,
         "deep_due_diligence" => PRICE_DEEP_DUE_DILIGENCE,
+        "micro_call" => PRICE_MICRO_CALL,
         _ => PRICE_AI_SYNTHESIS,
     }
 }
@@ -235,6 +253,7 @@ mod tests {
             service: String::new(),
             task_type: "hash".to_string(),
             simulate_timeout: false,
+            simulate_garbage: false,
             scheme: String::new(),
             batch: Vec::new(),
         };

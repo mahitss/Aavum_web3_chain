@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { explorerTx } from '@/config/chains';
 import { API_URL } from '@/lib/contracts';
 import { shortHash, tusd } from '@/lib/format';
+import { ReceiptModal } from '@/components/terminal/ReceiptModal';
 
 export type LedgerRow = {
   kind: string;
@@ -12,6 +13,7 @@ export type LedgerRow = {
   amount?: string;
   status: string;
   block?: number;
+  taskId?: string;
 };
 
 type ChainEvent = {
@@ -38,6 +40,8 @@ export function DualTerminal({
   const stream = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState<'stream' | 'ledger' | null>(null);
   const [chain, setChain] = useState<LedgerRow[]>([]);
+  const [selected, setSelected] = useState<LedgerRow | null>(null);
+  const [exportError, setExportError] = useState('');
   const rows = useMemo(() => mergeRows(chain, ledger), [chain, ledger]);
 
   useEffect(() => {
@@ -78,7 +82,7 @@ export function DualTerminal({
   }
 
   return (
-    <div className="grid gap-4">
+    <div data-tour="proof" className="grid gap-4">
       <section className="term rounded-2xl border border-line p-4">
         <header className="mb-3 flex items-center justify-between text-sm text-slate-300">
           <span>Activity {live ? '· live' : '· reconnecting'}</span>
@@ -106,12 +110,17 @@ export function DualTerminal({
         </section>
       ) : null}
       <section className="term rounded-2xl border border-line p-4">
-        <header className="mb-3 flex items-center justify-between text-sm text-slate-300">
+        <header className="mb-3 flex items-center justify-between gap-3 text-sm text-slate-300">
           <span>Verifiable Aevum Testnet Ledger</span>
-          <button type="button" onClick={() => copy('ledger')} className="inline-flex items-center gap-1 text-slate-400">
-            <Copy size={12} /> {copied === 'ledger' ? 'Copied' : 'Copy'}
-          </button>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => downloadLedger('csv', setExportError)} className="text-cyan">Export Audit Ledger (CSV)</button>
+            <button type="button" onClick={() => downloadLedger('json', setExportError)} className="text-cyan">JSON</button>
+            <button type="button" onClick={() => copy('ledger')} className="inline-flex items-center gap-1 text-slate-400">
+              <Copy size={12} /> {copied === 'ledger' ? 'Copied' : 'Copy'}
+            </button>
+          </div>
         </header>
+        {exportError ? <p className="mb-2 text-xs text-panic">{exportError}</p> : null}
         <div className="h-40 overflow-auto">
           <table className="w-full text-left font-mono text-xs">
             <thead className="text-slate-500">
@@ -132,7 +141,13 @@ export function DualTerminal({
                 </tr>
               ) : null}
               {rows.map((row) => (
-                <tr key={`${row.kind}-${row.txHash}`} className="border-t border-white/5">
+                <tr
+                  key={`${row.kind}-${row.txHash}`}
+                  className="cursor-pointer border-t border-white/5 hover:bg-white/5"
+                  onClick={() => {
+                    if (/refund|confirm|settl|reject|complet/i.test(row.status)) setSelected(row);
+                  }}
+                >
                   <td className="py-2 pr-2">{row.kind}</td>
                   <td>{row.block || '—'}</td>
                   <td>
@@ -148,8 +163,29 @@ export function DualTerminal({
           </table>
         </div>
       </section>
+      {selected ? <ReceiptModal taskId={selected.taskId} txHash={selected.txHash} onClose={() => setSelected(null)} /> : null}
     </div>
   );
+}
+
+async function downloadLedger(format: 'csv' | 'json', onError: (message: string) => void) {
+  try {
+  const response = await fetch(`${API_URL}/api/ledger/export?format=${format}`);
+  if (!response.ok) {
+    onError('Ledger export is unavailable');
+    return;
+  }
+  onError('');
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = format === 'csv' ? 'nexus402-ledger.csv' : 'nexus402-ledger.json';
+  link.click();
+  URL.revokeObjectURL(url);
+  } catch (error) {
+    onError(error instanceof Error ? error.message : 'Ledger export is unavailable');
+  }
 }
 
 function chainRow(event: ChainEvent): LedgerRow {

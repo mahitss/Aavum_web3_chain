@@ -75,6 +75,8 @@ export const nexusEscrowAbi = [
       { name: 'taskHash', type: 'bytes32' },
       { name: 'resultHash', type: 'bytes32' },
       { name: 'status', type: 'uint8' },
+      { name: 'evaluator', type: 'address' },
+      { name: 'challengeWindowBlocks', type: 'uint256' },
     ],
   },
   {
@@ -132,6 +134,68 @@ export const nexusEscrowAbi = [
       { name: 'taskId', type: 'bytes32', indexed: true },
       { name: 'principal', type: 'address', indexed: true },
       { name: 'amount', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'enforceAllowlist',
+    stateMutability: 'view',
+    inputs: [{ name: 'principal', type: 'address' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
+    type: 'function',
+    name: 'setEnforceAllowlist',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'enabled', type: 'bool' }],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'setWorkerAllowlist',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'worker', type: 'address' },
+      { name: 'allowed', type: 'bool' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'setOrgVaultLimits',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'globalHourlyLimit', type: 'uint256' }],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'emergencyPauseAllAgents',
+    stateMutability: 'nonpayable',
+    inputs: [],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'unpauseAllAgents',
+    stateMutability: 'nonpayable',
+    inputs: [],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'getOrgVault',
+    stateMutability: 'view',
+    inputs: [{ name: 'principal', type: 'address' }],
+    outputs: [
+      {
+        type: 'tuple',
+        components: [
+          { name: 'globalHourlyLimit', type: 'uint256' },
+          { name: 'globalCurrentWindow', type: 'uint256' },
+          { name: 'globalSpentInWindow', type: 'uint256' },
+          { name: 'globalPaused', type: 'bool' },
+        ],
+      },
     ],
   },
 ] as const;

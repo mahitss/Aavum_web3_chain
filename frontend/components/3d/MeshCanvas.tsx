@@ -68,18 +68,47 @@ function WorkerNode() {
   );
 }
 
-function EscrowNode() {
+function EscrowNode({ alert }: { alert: boolean }) {
   const ref = useRef<Mesh>(null);
   useFrame(({ clock }) => {
     if (!ref.current) return;
     ref.current.rotation.y = clock.elapsedTime * 0.45;
     ref.current.position.y = Math.sin(clock.elapsedTime * 1.3) * 0.06;
+    const material = ref.current.material;
+    if (!Array.isArray(material) && 'emissiveIntensity' in material) {
+      material.emissiveIntensity = alert ? 0.4 + Math.abs(Math.sin(clock.elapsedTime * 8)) * 1.4 : 0.45;
+    }
   });
   return (
     <group position={ESCROW}>
       <mesh ref={ref}>
         <icosahedronGeometry args={[0.58, 0]} />
-        <meshStandardMaterial color="#f59e0b" emissive="#f59e0b" emissiveIntensity={0.45} metalness={0.75} roughness={0.25} />
+        <meshStandardMaterial color={alert ? '#ef4444' : '#f59e0b'} emissive={alert ? '#ef4444' : '#f59e0b'} emissiveIntensity={0.45} metalness={0.75} roughness={0.25} />
+      </mesh>
+      {alert ? (
+        <mesh>
+          <octahedronGeometry args={[0.92, 0]} />
+          <meshBasicMaterial color="#ef4444" wireframe transparent opacity={0.85} />
+        </mesh>
+      ) : null}
+    </group>
+  );
+}
+
+function EvaluatorRing() {
+  const ring = useRef<Mesh>(null);
+  useFrame(({ clock }) => {
+    if (ring.current) ring.current.rotation.z = clock.elapsedTime * 0.8;
+  });
+  return (
+    <group position={[ESCROW[0], ESCROW[1] + 1.05, ESCROW[2]]}>
+      <mesh ref={ring}>
+        <torusGeometry args={[0.34, 0.02, 12, 48]} />
+        <meshBasicMaterial color="#f87171" />
+      </mesh>
+      <mesh>
+        <sphereGeometry args={[0.08, 16, 16]} />
+        <meshBasicMaterial color="#fecaca" />
       </mesh>
     </group>
   );
@@ -136,7 +165,7 @@ function SubWorker() {
   );
 }
 
-function ParticleStream({ active, reverse = false, payout = false, hop = false }: { active: boolean; reverse?: boolean; payout?: boolean; hop?: boolean }) {
+function ParticleStream({ active, reverse = false, payout = false, hop = false, slash = false }: { active: boolean; reverse?: boolean; payout?: boolean; hop?: boolean; slash?: boolean }) {
   const meshes = useRef<Array<Mesh | null>>([]);
   const started = useMemo(() => performance.now(), [active]);
   useFrame(() => {
@@ -158,14 +187,14 @@ function ParticleStream({ active, reverse = false, payout = false, hop = false }
           }}
         >
           <sphereGeometry args={[0.045, 12, 12]} />
-          <meshBasicMaterial color={hop ? (index % 2 === 0 ? '#67e8f9' : '#a78bfa') : payout ? (index % 2 === 0 ? '#10b981' : '#67e8f9') : reverse ? '#f59e0b' : '#fef3c7'} />
+          <meshBasicMaterial color={slash ? '#ef4444' : hop ? (index % 2 === 0 ? '#67e8f9' : '#a78bfa') : payout ? (index % 2 === 0 ? '#10b981' : '#67e8f9') : reverse ? '#f59e0b' : '#fef3c7'} />
         </mesh>
       ))}
     </>
   );
 }
 
-export function MeshCanvas({ pulse, refundPulse = 0, meteredPulse = 0, hopPulse = 0 }: { pulse: number; refundPulse?: number; meteredPulse?: number; hopPulse?: number }) {
+export function MeshCanvas({ pulse, refundPulse = 0, meteredPulse = 0, hopPulse = 0, rejectPulse = 0 }: { pulse: number; refundPulse?: number; meteredPulse?: number; hopPulse?: number; rejectPulse?: number }) {
   return (
     <Canvas camera={{ position: [0, 1.15, 6.4], fov: 45 }} className="h-full w-full">
       <color attach="background" args={['#05070a']} />
@@ -175,14 +204,15 @@ export function MeshCanvas({ pulse, refundPulse = 0, meteredPulse = 0, hopPulse 
       <pointLight position={[0, -1, 2]} intensity={18} color="#f59e0b" />
       <Orchestrator />
       <WorkerNode />
-      <EscrowNode />
+      <EscrowNode alert={rejectPulse > 0} />
+      <EvaluatorRing />
       <SubWorker />
       <Line points={[ORCH, WORKER]} color="#10b981" dashed dashSize={0.16} gapSize={0.1} />
       <Line points={[WORKER, SUB]} color="#a78bfa" />
       <Line points={[ORCH, ESCROW]} color="#f59e0b" />
       <Line points={[WORKER, ESCROW]} color="#06b6d4" />
       <ParticleStream active={pulse > 0} />
-      <ParticleStream active={refundPulse > 0 || meteredPulse > 0} reverse />
+      <ParticleStream active={refundPulse > 0 || meteredPulse > 0} reverse slash={rejectPulse > 0} />
       <ParticleStream active={meteredPulse > 0} payout />
       <ParticleStream active={hopPulse > 0} hop />
       <Grid

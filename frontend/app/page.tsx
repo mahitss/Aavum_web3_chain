@@ -5,11 +5,14 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { isAddress, isHex, type Address, type Hex } from 'viem';
 import { useAccount, useReadContract, useSwitchChain, useWriteContract } from 'wagmi';
-import { aevumTestnet, explorerTx } from '@/config/chains';
+import { aevumTestnet, explorerPassport, explorerTx } from '@/config/chains';
 import { MeshBoundary } from '@/components/3d/MeshBoundary';
 import { EmergencyPanic } from '@/components/controls/EmergencyPanic';
 import { SessionDelegator } from '@/components/controls/SessionDelegator';
+import { OrgVaultPanel } from '@/components/controls/OrgVaultPanel';
+import { ProtocolPlayground } from '@/components/playground/ProtocolPlayground';
 import { DualTerminal, type LedgerRow } from '@/components/terminal/DualTerminal';
+import { JudgeTour } from '@/components/ui/JudgeTour';
 import { SystemWakeBanner } from '@/components/ui/SystemWakeBanner';
 import { API_URL, erc20Abi, NEXUS_ESCROW_ADDRESS, nexusEscrowAbi, TUSD8_ADDRESS } from '@/lib/contracts';
 import { shortHash, tusd } from '@/lib/format';
@@ -52,6 +55,13 @@ type OrchestratorJob = {
   actual_amount?: string;
   refunded_change?: string;
   breakdown?: string[];
+  voucher_calls?: number;
+  avg_latency_ms?: number;
+  reliability_bps?: number;
+  previous_reliability_bps?: number;
+  payment_required?: string;
+  payment_signature?: string;
+  payment_response?: string;
   provenance?: {
     parentTaskId?: string;
     parentAmount?: string;
@@ -71,6 +81,8 @@ type CatalogWorker = {
   totalVolumeSettled?: string;
   reliabilityBps?: number;
   reputationKnown?: boolean;
+  agentId?: number;
+  identityAddress?: string;
 };
 
 function asUnits(value: unknown): bigint {
@@ -104,12 +116,14 @@ export default function HomePage() {
   const [sandbox, setSandbox] = useState<SandboxStatus>({});
   const [catalog, setCatalog] = useState<CatalogWorker[]>([]);
   const [refundBurst, setRefundBurst] = useState(0);
+  const [rejectBurst, setRejectBurst] = useState(0);
   const [meteredBurst, setMeteredBurst] = useState(0);
   const [hopBurst, setHopBurst] = useState(0);
   const [historyReady, setHistoryReady] = useState(false);
   const markHistoryReady = useCallback(() => setHistoryReady(true), []);
   const [localLedger, setLocalLedger] = useState<LedgerRow[]>([]);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  const [tourSignal, setTourSignal] = useState(0);
 
   const agent = isAddress(agentKey) ? (agentKey as Address) : undefined;
   const principalBalance = useReadContract({
@@ -126,6 +140,14 @@ export default function HomePage() {
     args: address && agent ? [address, agent] : undefined,
     query: { enabled: Boolean(address && agent && NEXUS_ESCROW_ADDRESS), refetchInterval: 8000 },
   });
+  const allowlist = useReadContract({
+    address: NEXUS_ESCROW_ADDRESS,
+    abi: nexusEscrowAbi,
+    functionName: 'enforceAllowlist',
+    args: address ? [address] : undefined,
+    query: { enabled: Boolean(address && NEXUS_ESCROW_ADDRESS), refetchInterval: 8000 },
+  });
+  const allowlistWrite = useWriteContract();
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
@@ -158,7 +180,19 @@ export default function HomePage() {
           next[index] = { ...current[index], ...job };
           return next;
         });
-        if (job.event === 'MULTI_HOP_SETTLED') {
+        if (job.event === 'EVALUATOR_REJECTED') {
+          setRejectBurst((count) => count + 1);
+          setRefundBurst((count) => count + 1);
+          if (typeof job.reliability_bps === 'number') {
+            setCatalog((current) =>
+              current.map((worker, index) =>
+                index === 0
+                  ? { ...worker, reliabilityBps: job.reliability_bps, reputationKnown: true, tasksRefunded: (worker.tasksRefunded || 0) + 1 }
+                  : worker,
+              ),
+            );
+          }
+        } else if (job.event === 'MULTI_HOP_SETTLED') {
           setHopBurst((count) => count + 1);
         } else if (job.event === 'TASK_COMPLETED_METERED') {
           setMeteredBurst((count) => count + 1);
@@ -222,9 +256,9 @@ export default function HomePage() {
     const remote = jobs.flatMap((job) => {
       const amount = job.amount === undefined ? undefined : String(job.amount);
       const rows: LedgerRow[] = [];
-      if (job.lock_tx_hash) rows.push({ kind: 'Escrow Lock', txHash: job.lock_tx_hash, amount, status: job.status || 'Locked' });
-      if (job.claim_tx_hash) rows.push({ kind: 'Proof Claim', txHash: job.claim_tx_hash, amount, status: 'Confirmed' });
-      if (job.refund_tx_hash) rows.push({ kind: 'Auto Refund', txHash: job.refund_tx_hash, amount, status: 'REFUNDED' });
+      if (job.lock_tx_hash) rows.push({ kind: 'Escrow Lock', txHash: job.lock_tx_hash, amount, status: job.status || 'Locked', taskId: job.task_id });
+      if (job.claim_tx_hash) rows.push({ kind: 'Proof Claim', txHash: job.claim_tx_hash, amount, status: 'Confirmed', taskId: job.task_id });
+      if (job.refund_tx_hash) rows.push({ kind: 'Auto Refund', txHash: job.refund_tx_hash, amount, status: 'REFUNDED', taskId: job.task_id });
       return rows;
     });
     return [...localLedger, ...remote];
@@ -241,7 +275,7 @@ export default function HomePage() {
   const spendRatio = capEnforced ? 100 : limit > 0n ? Number((spent * 100n) / limit) : 0;
   const sessionActive = Boolean(session.data?.[6]);
   const nextStep = !isConnected
-    ? 'Sandbox mode can run the six judge scenarios without a wallet. Connect MetaMask when you want to sign your own session and use the kill switch.'
+    ? 'Sandbox mode can run the eight judge scenarios without a wallet. Connect MetaMask when you want to sign your own session and use the kill switch.'
     : !NEXUS_ESCROW_ADDRESS
       ? 'The escrow address is not set, so approve, register, revoke, and refund stay off.'
       : !agent
@@ -274,7 +308,7 @@ export default function HomePage() {
     }
   }
 
-  async function runScenario(scenario: 'happy_path' | 'velocity_attack' | 'kill_switch_test' | 'worker_timeout_refund' | 'metered_batch' | 'multi_hop_swarm') {
+  async function runScenario(scenario: 'happy_path' | 'velocity_attack' | 'kill_switch_test' | 'worker_timeout_refund' | 'metered_batch' | 'multi_hop_swarm' | 'voucher_burst' | 'evaluator_dispute_slash') {
     setNotice(`Starting ${scenario}...`);
     try {
       const response = await fetch(`${API_URL}/api/scenarios/run`, {
@@ -324,16 +358,20 @@ export default function HomePage() {
           <h1 className="text-2xl font-medium">Pay a worker from a capped session</h1>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          <button type="button" onClick={() => setTourSignal((value) => value + 1)} className="rounded-lg border border-line px-3 py-2 text-sm">
+            Quick Tour
+          </button>
           <span className="text-sm text-slate-400">Aevum testnet · 44005</span>
           <ConnectButton />
         </div>
       </header>
+      <JudgeTour signal={tourSignal} />
 
       <SystemWakeBanner />
       <LowBalanceBadge sandbox={sandbox} />
 
       {!isConnected ? (
-        <section className="rounded-xl border border-emerald/40 bg-card px-4 py-3 text-sm leading-6">
+        <section data-tour="sandbox" className="rounded-xl border border-emerald/40 bg-card px-4 py-3 text-sm leading-6">
           <p>Sandbox Mode Active — Trigger real QDay Aevum Testnet settlements immediately without a wallet.</p>
           <p className="mt-2 font-mono text-xs text-slate-400">
             {sandbox.sandboxEnabled ? 'Public sandbox enabled' : 'Public sandbox is off on this server'} · quota {sandbox.remainingIpQuota ?? '—'} · principal tUSD8 {tusd(sandbox.principalTusd8Balance)} · agent gas {sandbox.agentGasBalance ?? '—'} · session {sandbox.sessionActive ? 'active' : 'inactive'}
@@ -364,9 +402,9 @@ export default function HomePage() {
         <Metric label="Settled tasks" value={String(settledCount)} />
       </section>
 
-      <section className="panel relative h-[420px] overflow-hidden rounded-3xl">
+      <section data-tour="mesh" className="panel relative h-[420px] overflow-hidden rounded-3xl">
         <MeshBoundary>
-          <MeshCanvas pulse={settledCount + burst} refundPulse={refundBurst} meteredPulse={meteredBurst} hopPulse={hopBurst} />
+          <MeshCanvas pulse={settledCount + burst} refundPulse={refundBurst} meteredPulse={meteredBurst} hopPulse={hopBurst} rejectPulse={rejectBurst} />
         </MeshBoundary>
         <div className="pointer-events-none absolute left-4 top-4 space-y-1 font-mono text-xs">
           <p className="text-emerald">Client Orchestrator (Go)</p>
@@ -420,6 +458,7 @@ export default function HomePage() {
             <p className="text-sm text-slate-300">{notice || 'Refund stays off until a task id exists and is not settled.'}</p>
             {refundWrite.error ? <p className="text-sm text-panic">{refundWrite.error.message}</p> : null}
           </form>
+          {isConnected ? <OrgVaultPanel /> : null}
           {isConnected ? <EmergencyPanic agentKey={agentKey} killed={killed} onKilled={(hash) => remember('Revocation', hash)} /> : null}
         </div>
         <div className="space-y-4">
@@ -441,7 +480,11 @@ export default function HomePage() {
               </ul>
             )}
           </section>
-          <section className="panel space-y-3 rounded-2xl p-5" aria-label="Live demo scenarios">
+          <ProtocolPlayground
+            jobs={jobs}
+            services={[...new Set(catalog.flatMap((worker) => (worker.services || []).map((item) => item.name)).filter(Boolean))]}
+          />
+          <section data-tour="scenarios" className="panel space-y-3 rounded-2xl p-5" aria-label="Live demo scenarios">
             <div>
               <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Live demo scenarios</p>
               <h2 className="text-lg font-medium">Run a judge path</h2>
@@ -474,6 +517,12 @@ export default function HomePage() {
               <button type="button" onClick={() => runScenario('multi_hop_swarm')} className="rounded-lg border border-cyan/50 px-3 py-2 text-left text-sm">
                 Multi-Hop A2A Supply Chain
               </button>
+              <button type="button" onClick={() => runScenario('voucher_burst')} className="rounded-lg border border-emerald/50 px-3 py-2 text-left text-sm">
+                10x Off-Chain Voucher Burst (1-Tx Batch)
+              </button>
+              <button type="button" onClick={() => runScenario('evaluator_dispute_slash')} className="rounded-lg border border-panic/50 px-3 py-2 text-left text-sm">
+                Trigger Garbage Output & Evaluator Slash
+              </button>
             </div>
             <p className="text-xs text-slate-500">Revoke the agent key first, then Test Kill Switch. The chain must answer SessionInactive.</p>
           </section>
@@ -499,7 +548,21 @@ export default function HomePage() {
           <OutputInspector job={latestOutput} />
           <MeteredReceipt job={[...jobs].reverse().find((job) => job.actual_amount) || null} />
           <ProvenanceTree job={[...jobs].reverse().find((job) => job.provenance) || null} />
-          <ReputationBoard workers={catalog} />
+          <BatchCompression job={[...jobs].reverse().find((job) => job.event === 'VOUCHER_BATCH_SETTLED' || job.voucher_calls) || null} />
+          <ReputationBoard
+            workers={catalog}
+            canToggle={Boolean(isConnected && address && NEXUS_ESCROW_ADDRESS)}
+            enabled={Boolean(allowlist.data)}
+            onToggle={() => {
+              if (!NEXUS_ESCROW_ADDRESS) return;
+              allowlistWrite.writeContract({
+                address: NEXUS_ESCROW_ADDRESS,
+                abi: nexusEscrowAbi,
+                functionName: 'setEnforceAllowlist',
+                args: [!allowlist.data],
+              });
+            }}
+          />
           <DualTerminal logs={logs} ledger={ledger} live={live} onHistoryReady={markHistoryReady} receipt={[...jobs].reverse().find((job) => job.actual_amount) || null} />
         </div>
       </section>
@@ -557,10 +620,30 @@ function ProvenanceTree({ job }: { job: OrchestratorJob | null }) {
   );
 }
 
-function ReputationBoard({ workers }: { workers: CatalogWorker[] }) {
+function BatchCompression({ job }: { job: OrchestratorJob | null }) {
+  if (!job?.voucher_calls) return null;
+  return (
+    <section className="panel rounded-2xl border border-emerald/40 p-5">
+      <h2 className="text-lg font-medium">Batch Settlement Compression</h2>
+      <p className="mt-2 text-sm">{job.voucher_calls} off-chain signed micro-calls, average {job.avg_latency_ms ?? '—'} ms</p>
+      <p className="text-sm">1 on-chain settlement transaction</p>
+      <p className="mt-2 inline-block rounded-full border border-emerald/50 px-2 py-1 text-xs text-emerald">90% fewer settlement transactions than 10 separate escrows</p>
+      {job.lock_tx_hash ? <a className="mt-2 block text-sm text-cyan underline-offset-2 hover:underline" href={explorerTx(job.lock_tx_hash)} target="_blank" rel="noreferrer">openSessionTab {shortHash(job.lock_tx_hash)}</a> : null}
+      {job.claim_tx_hash ? <a className="block text-sm text-cyan underline-offset-2 hover:underline" href={explorerTx(job.claim_tx_hash)} target="_blank" rel="noreferrer">settleVoucherBatch {shortHash(job.claim_tx_hash)}</a> : null}
+    </section>
+  );
+}
+
+function ReputationBoard({ workers, canToggle, enabled, onToggle }: { workers: CatalogWorker[]; canToggle: boolean; enabled: boolean; onToggle: () => void }) {
   return (
     <section className="panel rounded-2xl p-5">
-      <h2 className="text-lg font-medium">Worker Reputation Leaderboard</h2>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-lg font-medium">Worker Reputation Leaderboard</h2>
+        <label className="flex items-center gap-2 text-xs text-slate-300">
+          Strict Recipient Allowlist Mode
+          <input type="checkbox" checked={enabled} disabled={!canToggle} onChange={onToggle} />
+        </label>
+      </div>
       {workers.length === 0 ? (
         <p className="mt-2 text-sm text-slate-400">No workers discovered yet.</p>
       ) : (
@@ -576,6 +659,15 @@ function ReputationBoard({ workers }: { workers: CatalogWorker[] }) {
               <p className="mt-1 text-xs text-slate-400">
                 completed {worker.tasksCompleted || 0} · refunded {worker.tasksRefunded || 0} · volume {tusd(worker.totalVolumeSettled)} tUSD8
               </p>
+              {worker.agentId ? (
+                worker.identityAddress ? (
+                  <a className="mt-1 block text-xs text-cyan underline-offset-2 hover:underline" href={explorerPassport(worker.identityAddress, worker.agentId)} target="_blank" rel="noreferrer">ERC-8004 Passport #{worker.agentId}</a>
+                ) : (
+                  <p className="mt-1 text-xs text-cyan">ERC-8004 Passport #{worker.agentId}</p>
+                )
+              ) : (
+                <p className="mt-1 text-xs text-slate-500">ERC-8004 passport not issued</p>
+              )}
             </li>
           ))}
         </ul>

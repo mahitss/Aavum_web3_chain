@@ -18,3 +18,7 @@ export const explorerUrl = aevumTestnet.blockExplorers.default.url;
 export function explorerTx(hash: string) {
   return `${explorerUrl}/tx/${hash}`;
 }
+
+export function explorerPassport(identity: string, agentId: number) {
+  return `${explorerUrl}/token/${identity}/instance/${agentId}`;
+}

@@ -114,6 +114,7 @@ async fn hire_one(
         lock_tx_hash: lock_tx.clone(),
         agent_key: chain.worker_address().to_string(),
         principal: principal.to_string(),
+        ..PaymentSignature::default()
     };
     let paid = client
         .post(&url)

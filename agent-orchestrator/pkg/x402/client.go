@@ -10,12 +10,14 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/nexus402/agent-orchestrator/pkg/aevum"
 	"github.com/nexus402/agent-orchestrator/pkg/types"
 )
@@ -83,6 +85,7 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	if resp.StatusCode != http.StatusPaymentRequired {
 		return fmt.Errorf("expected 402 Payment Required from worker, received: %d", resp.StatusCode)
 	}
+	job.PaymentRequired = resp.Header.Get("PAYMENT-REQUIRED")
 
 	job.Status = "402_CHALLENGED"
 	c.notify(job)
@@ -100,8 +103,18 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 		}
 		reserved = true
 	}
+	if job.Scheme == "batch-settlement" {
+		return c.settleOneVoucher(ctx, job, challenge, reqBody, computeURL, reserved)
+	}
 
-	taskID, lockTxHash, deadline, err := c.aevumClient.LockEscrow(ctx, challenge.Receiver, challenge.Amount, challenge.TimeoutBlocks, challenge.TaskHash)
+	var taskID [32]byte
+	var lockTxHash string
+	var deadline uint64
+	if job.Evaluator || job.Scheme == "auth-capture" {
+		taskID, lockTxHash, deadline, err = c.lockEvaluated(ctx, challenge)
+	} else {
+		taskID, lockTxHash, deadline, err = c.aevumClient.LockEscrow(ctx, challenge.Receiver, challenge.Amount, challenge.TimeoutBlocks, challenge.TaskHash)
+	}
 	if err != nil {
 		if reserved {
 			c.release(challenge.Amount)
@@ -125,17 +138,22 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 	retryReq.Header.Set("Content-Type", "application/json")
 	retryReq.Header.Set("X-Escrow-TaskId", job.TaskId)
 	retryReq.Header.Set("X-Escrow-TxHash", job.LockTxHash)
-	signature, err := json.Marshal(map[string]any{
+	signatureBody := map[string]any{
 		"x402Version": 2,
 		"taskId":      job.TaskId,
 		"lockTxHash":  job.LockTxHash,
 		"agentKey":    c.aevumClient.AgentAddress().Hex(),
 		"principal":   c.aevumClient.PrincipalAddress().Hex(),
-	})
+	}
+	if job.Scheme != "" {
+		signatureBody["scheme"] = job.Scheme
+	}
+	signature, err := json.Marshal(signatureBody)
 	if err != nil {
 		return err
 	}
-	retryReq.Header.Set("PAYMENT-SIGNATURE", base64.StdEncoding.EncodeToString(signature))
+	job.PaymentSignature = base64.StdEncoding.EncodeToString(signature)
+	retryReq.Header.Set("PAYMENT-SIGNATURE", job.PaymentSignature)
 
 	retryResp, err := c.httpClient.Do(retryReq)
 	if err != nil {
@@ -167,7 +185,13 @@ func (c *Client) ExecuteTask(ctx context.Context, job *types.TaskJob) error {
 		return fmt.Errorf("invalid compute response: %w", err)
 	}
 
-	job.Status = "SETTLED"
+	job.PaymentResponse = retryResp.Header.Get("PAYMENT-RESPONSE")
+	if computeResp.Status == "SUBMITTED_FOR_EVALUATION" {
+		job.Status = "SUBMITTED"
+		job.Event = "SUBMITTED_FOR_EVALUATION"
+	} else {
+		job.Status = "SETTLED"
+	}
 	job.Result = computeResp.Result
 	job.ResultHash = computeResp.ResultHash
 	job.ClaimTxHash = computeResp.ClaimTxHash
@@ -226,7 +250,7 @@ func canonicalService(job *types.TaskJob) string {
 		raw = job.TaskType
 	}
 	switch raw {
-	case "web_brief", "chain_audit", "ai_synthesis", "deep_due_diligence":
+	case "web_brief", "chain_audit", "ai_synthesis", "deep_due_diligence", "micro_call":
 		return raw
 	default:
 		return "ai_synthesis"
@@ -296,13 +320,13 @@ type paymentAccept struct {
 }
 
 func chooseAccept(accepts []paymentAccept, prefer string) (paymentAccept, error) {
-	if prefer == "upto" {
+	if prefer != "" && prefer != "exact" && prefer != "nexus-escrow-v1" {
 		for _, accept := range accepts {
-			if accept.Scheme == "upto" {
+			if accept.Scheme == prefer {
 				return accept, nil
 			}
 		}
-		return paymentAccept{}, fmt.Errorf("worker did not offer an upto scheme")
+		return paymentAccept{}, fmt.Errorf("worker did not offer a %s scheme", prefer)
 	}
 	for _, accept := range accepts {
 		if accept.Scheme == "exact" || accept.Scheme == "nexus-escrow-v1" {
@@ -360,7 +384,7 @@ func parsePaymentRequired(encoded string, prefer string) (*types.PaymentChalleng
 		challenge.TimeoutBlocks = accepted.TimeoutBlocks
 	}
 	switch challenge.Scheme {
-	case "exact", "upto", "nexus-escrow-v1":
+	case "exact", "upto", "nexus-escrow-v1", "auth-capture", "batch-settlement":
 	default:
 		return nil, fmt.Errorf("unsupported scheme: %s", challenge.Scheme)
 	}
@@ -389,4 +413,117 @@ func parsePaymentRequired(encoded string, prefer string) (*types.PaymentChalleng
 		TaskHash:      taskHash,
 		TimeoutBlocks: timeout,
 	}, nil
+}
+
+func (c *Client) lockEvaluated(ctx context.Context, challenge *types.PaymentChallenge) ([32]byte, string, uint64, error) {
+	var taskID [32]byte
+	keyHex := strings.TrimSpace(os.Getenv("EVALUATOR_PRIVATE_KEY"))
+	if keyHex == "" {
+		return taskID, "", 0, fmt.Errorf("EVALUATOR_PRIVATE_KEY is unset")
+	}
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(keyHex, "0x"))
+	if err != nil {
+		return taskID, "", 0, fmt.Errorf("invalid evaluator key: %w", err)
+	}
+	evaluator := crypto.PubkeyToAddress(key.PublicKey)
+	window := challenge.TimeoutBlocks
+	if window == 0 {
+		window = 30
+	}
+	return c.aevumClient.LockEvaluatedEscrow(ctx, challenge.Receiver, evaluator, challenge.Amount, challenge.TimeoutBlocks, window, challenge.TaskHash)
+}
+
+func (c *Client) settleOneVoucher(ctx context.Context, job *types.TaskJob, challenge *types.PaymentChallenge, reqBody []byte, computeURL string, reserved bool) error {
+	release := func() {
+		if reserved && challenge.Amount != nil {
+			c.release(challenge.Amount)
+		}
+	}
+	tabID, openTx, err := c.aevumClient.OpenSessionTab(ctx, challenge.Receiver, challenge.Amount, challenge.TimeoutBlocks)
+	if err != nil {
+		release()
+		if openTx != "" {
+			job.LockTxHash = openTx
+		}
+		return fmt.Errorf("openSessionTab failed: %w", err)
+	}
+	job.LockTxHash = openTx
+	job.TaskId = "0x" + hex.EncodeToString(tabID[:])
+	job.Status = "ESCROW_LOCKED"
+	job.Amount = challenge.Amount
+	c.notify(job)
+	validBefore := uint64(time.Now().Add(time.Hour).Unix())
+	signature, err := c.aevumClient.SignVoucher(tabID, challenge.Amount, 1, validBefore)
+	if err != nil {
+		release()
+		return err
+	}
+	wire, err := json.Marshal(map[string]any{
+		"scheme":           "batch-settlement",
+		"tabId":            job.TaskId,
+		"cumulativeAmount": challenge.Amount.String(),
+		"nonce":            1,
+		"validBefore":      validBefore,
+		"agentSignature":   "0x" + hex.EncodeToString(signature),
+		"agentKey":         c.aevumClient.AgentAddress().Hex(),
+		"principal":        c.aevumClient.PrincipalAddress().Hex(),
+	})
+	if err != nil {
+		release()
+		return err
+	}
+	job.PaymentSignature = base64.StdEncoding.EncodeToString(wire)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, computeURL, bytes.NewReader(reqBody))
+	if err != nil {
+		release()
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("PAYMENT-SIGNATURE", job.PaymentSignature)
+	request.Header.Set("x-defer-voucher-flush", "1")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		release()
+		return err
+	}
+	defer response.Body.Close()
+	payload, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	job.PaymentResponse = response.Header.Get("PAYMENT-RESPONSE")
+	if response.StatusCode != http.StatusOK {
+		release()
+		return fmt.Errorf("voucher call returned %d: %s", response.StatusCode, string(payload))
+	}
+	settleURL := strings.TrimSuffix(computeURL, "/api/v1/compute") + "/api/v1/tabs/" + job.TaskId + "/settle"
+	settleRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, settleURL, nil)
+	if err != nil {
+		return err
+	}
+	settleResponse, err := c.httpClient.Do(settleRequest)
+	if err != nil {
+		return err
+	}
+	defer settleResponse.Body.Close()
+	var settled struct {
+		Settled bool   `json:"settled"`
+		TxHash  string `json:"txHash"`
+		Error   string `json:"error"`
+	}
+	_ = json.NewDecoder(settleResponse.Body).Decode(&settled)
+	if !settled.Settled || settled.TxHash == "" {
+		return fmt.Errorf("batch settlement failed: %s", settled.Error)
+	}
+	var body struct {
+		Result     string `json:"result"`
+		ResultHash string `json:"result_hash"`
+	}
+	_ = json.Unmarshal(payload, &body)
+	job.Result = body.Result
+	job.ResultHash = body.ResultHash
+	job.ClaimTxHash = settled.TxHash
+	job.VoucherCalls = 1
+	job.Status = "SETTLED"
+	job.Event = "VOUCHER_BATCH_SETTLED"
+	job.SettledAt = time.Now().UTC()
+	c.notify(job)
+	return nil
 }

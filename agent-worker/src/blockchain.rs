@@ -28,9 +28,17 @@ sol! {
             bytes32 taskHash;
             bytes32 resultHash;
             uint8 status;
+            address evaluator;
+            uint256 challengeWindowBlocks;
         }
 
         function getTask(bytes32 taskId) external view returns (TaskEscrow memory);
+
+        function submitWorkForEvaluation(
+            bytes32 taskId,
+            bytes32 resultHash,
+            bytes calldata workerSignature
+        ) external;
 
         function completeTaskWithProof(
             bytes32 taskId,
@@ -43,6 +51,27 @@ sol! {
             uint256 actualAmount,
             bytes32 resultHash,
             bytes calldata workerSignature
+        ) external;
+
+        struct SessionTab {
+            bytes32 tabId;
+            address principal;
+            address agentKey;
+            address worker;
+            uint256 depositAmount;
+            uint256 deadline;
+            uint256 lastSettledNonce;
+            bool open;
+        }
+
+        function getSessionTab(bytes32 tabId) external view returns (SessionTab memory);
+
+        function settleVoucherBatch(
+            bytes32 tabId,
+            uint256 cumulativeAmount,
+            uint256 nonce,
+            uint256 validBefore,
+            bytes calldata agentSignature
         ) external;
 
         function lockTaskEscrow(
@@ -67,6 +96,15 @@ type AevumFiller = JoinFill<
 >;
 type AevumProvider =
     FillProvider<AevumFiller, RootProvider<HttpTransport>, HttpTransport, Ethereum>;
+
+#[derive(Clone, Debug)]
+pub struct LoadedTab {
+    pub open: bool,
+    pub agent: Address,
+    pub worker: Address,
+    pub deposit: u64,
+    pub last_nonce: u64,
+}
 
 #[derive(Error, Debug)]
 pub enum BlockchainError {
@@ -208,6 +246,31 @@ impl BlockchainClient {
         Ok(format!("{:#x}", receipt.transaction_hash))
     }
 
+    pub async fn submit_for_evaluation(
+        &self,
+        task_id_bytes: [u8; 32],
+        result_hash_bytes: [u8; 32],
+    ) -> Result<String, BlockchainError> {
+        let signature = self
+            .sign_completion(task_id_bytes, result_hash_bytes)
+            .await?;
+        let call = self.contract.submitWorkForEvaluation(
+            B256::from(task_id_bytes),
+            B256::from(result_hash_bytes),
+            Bytes::from(signature),
+        );
+        let pending_tx = call
+            .send()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let receipt = pending_tx
+            .with_required_confirmations(1)
+            .get_receipt()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        Ok(format!("{:#x}", receipt.transaction_hash))
+    }
+
     pub async fn escrow_amount(&self, task_id_bytes: [u8; 32]) -> Result<u64, BlockchainError> {
         let returned = self
             .contract
@@ -335,6 +398,57 @@ impl BlockchainClient {
         Err(BlockchainError::RpcError(
             "TaskEscrowLocked event missing".into(),
         ))
+    }
+
+    pub async fn load_tab(&self, tab_id: [u8; 32]) -> Result<LoadedTab, BlockchainError> {
+        let returned = self
+            .contract
+            .getSessionTab(B256::from(tab_id))
+            .call()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let tab = returned._0;
+        let deposit: u64 = tab
+            .depositAmount
+            .try_into()
+            .map_err(|_| BlockchainError::RpcError("tab deposit overflows u64".into()))?;
+        Ok(LoadedTab {
+            open: tab.open,
+            agent: tab.agentKey,
+            worker: tab.worker,
+            deposit,
+            last_nonce: tab
+                .lastSettledNonce
+                .try_into()
+                .map_err(|_| BlockchainError::RpcError("tab nonce overflows u64".into()))?,
+        })
+    }
+
+    pub async fn settle_voucher(
+        &self,
+        tab_id: [u8; 32],
+        cumulative: u64,
+        nonce: u64,
+        valid_before: u64,
+        signature: Vec<u8>,
+    ) -> Result<String, BlockchainError> {
+        let call = self.contract.settleVoucherBatch(
+            B256::from(tab_id),
+            U256::from(cumulative),
+            U256::from(nonce),
+            U256::from(valid_before),
+            Bytes::from(signature),
+        );
+        let pending_tx = call
+            .send()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        let receipt = pending_tx
+            .with_required_confirmations(1)
+            .get_receipt()
+            .await
+            .map_err(|error| BlockchainError::RpcError(error.to_string()))?;
+        Ok(format!("{:#x}", receipt.transaction_hash))
     }
 
     pub async fn native_balance(&self) -> Result<U256, BlockchainError> {

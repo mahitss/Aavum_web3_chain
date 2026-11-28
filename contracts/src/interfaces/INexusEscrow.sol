@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {SessionConfig, TaskEscrow, WorkerStats} from "../types/NexusTypes.sol";
+import {OrgVault, SessionConfig, SessionTab, TaskEscrow, WorkerStats} from "../types/NexusTypes.sol";
 
 /// @title INexusEscrow
 /// @notice Agent session delegation and tUSD8 task escrow for the Nexus402 marketplace.
@@ -40,6 +40,26 @@ interface INexusEscrow {
     error InvalidProofSignature();
     error ZeroAmount();
     error ExceedsEscrowAmount();
+    error WorkerNotAllowlisted();
+    error TabClosed();
+    error StaleVoucherNonce();
+    error VoucherExpired();
+    error ExceedsTabDeposit();
+    error InvalidVoucherSignature();
+    error InvalidEvaluatorSignature();
+    error EvaluatorRequired();
+    error TaskNotSubmitted();
+    error WorkWindowClosed();
+    error ChallengeWindowClosed();
+    error AuthorizationCaptured();
+    error NotAuthorizedToVoid();
+    error OrgVaultPaused();
+    error ExceedsGlobalHourlyLimit();
+
+    event TaskSubmitted(bytes32 indexed taskId, address indexed worker, bytes32 resultHash);
+    event TaskEvaluated(bytes32 indexed taskId, address indexed evaluator, bool approved, bytes32 evaluationHash);
+    event TaskRejected(bytes32 indexed taskId, address indexed principal, uint256 amount);
+    event AuthorizationVoided(bytes32 indexed taskId, address indexed principal, uint256 amount);
 
     /// @notice Record a principal's EIP-712 authorization of an ephemeral agent key.
     function registerSessionWithSig(
@@ -58,6 +78,28 @@ interface INexusEscrow {
     function lockTaskEscrow(address principal, address worker, uint256 amount, uint256 durationBlocks, bytes32 taskHash)
         external
         returns (bytes32 taskId);
+
+    /// @notice Lock tUSD8 for a job that an evaluator must accept before the worker is paid.
+    /// @dev `evaluator == address(0)` keeps the instant direct-settlement path.
+    function lockEvaluatedEscrow(
+        address principal,
+        address worker,
+        address evaluator,
+        uint256 amount,
+        uint256 durationBlocks,
+        uint256 challengeWindowBlocks,
+        bytes32 taskHash
+    ) external returns (bytes32 taskId);
+
+    /// @notice Worker commits a signed result. Funds stay locked until `evaluateTask`.
+    function submitWorkForEvaluation(bytes32 taskId, bytes32 resultHash, bytes calldata workerSignature) external;
+
+    /// @notice Evaluator releases the escrow or refunds the principal.
+    function evaluateTask(bytes32 taskId, bool approved, bytes32 evaluationHash, bytes calldata evaluatorSignature)
+        external;
+
+    /// @notice Return an uncaptured authorization to the principal. Reputation is unchanged.
+    function voidAuthorization(bytes32 taskId) external;
 
     /// @notice Release escrow to the worker after an eth-signed proof from the worker key.
     function completeTaskWithProof(bytes32 taskId, bytes32 resultHash, bytes calldata workerSignature) external;
@@ -91,4 +133,30 @@ interface INexusEscrow {
         external
         view
         returns (WorkerStats memory stats, uint256 reliabilityBps);
+
+    function setWorkerAllowlist(address worker, bool allowed) external;
+
+    function setEnforceAllowlist(bool enabled) external;
+
+    function openSessionTab(address principal, address worker, uint256 depositAmount, uint256 durationBlocks)
+        external
+        returns (bytes32 tabId);
+
+    function settleVoucherBatch(
+        bytes32 tabId,
+        uint256 cumulativeAmount,
+        uint256 nonce,
+        uint256 validBefore,
+        bytes calldata agentSignature
+    ) external;
+
+    function getSessionTab(bytes32 tabId) external view returns (SessionTab memory);
+
+    function setOrgVaultLimits(uint256 globalHourlyLimit) external;
+
+    function emergencyPauseAllAgents() external;
+
+    function unpauseAllAgents() external;
+
+    function getOrgVault(address principal) external view returns (OrgVault memory);
 }

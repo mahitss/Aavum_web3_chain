@@ -25,6 +25,7 @@ import (
 	"github.com/nexus402/agent-orchestrator/pkg/discovery"
 	"github.com/nexus402/agent-orchestrator/pkg/sandbox"
 	"github.com/nexus402/agent-orchestrator/pkg/types"
+	"github.com/nexus402/agent-orchestrator/pkg/webhooks"
 	"github.com/nexus402/agent-orchestrator/pkg/x402"
 )
 
@@ -48,6 +49,9 @@ type Server struct {
 	watchdog       *aevum.Watchdog
 	directory      *discovery.Directory
 	chainLedger    []aevum.ChainLedgerEntry
+	receipts       map[string]x402.ReceiptDocument
+	receiptMu      sync.RWMutex
+	webhooks       *webhooks.Registry
 }
 
 func main() {
@@ -93,6 +97,8 @@ func main() {
 		sandboxLimit:   sandbox.NewLimiter(envPositive("SANDBOX_MAX_JOBS_PER_IP_HOUR", 5), time.Hour),
 		watchdog:       aevum.NewWatchdog(aevumClient),
 		directory:      discovery.New(uint64(envPositive("MIN_RELIABILITY_BPS", 8000))),
+		receipts:       map[string]x402.ReceiptDocument{},
+		webhooks:       webhooks.New(envBool("WEBHOOK_ALLOW_PRIVATE")),
 	}
 	hydrateCtx, hydrateCancel := context.WithTimeout(context.Background(), 45*time.Second)
 	chainLedger, hydrateErr := aevumClient.HydrateLedger(hydrateCtx)
@@ -137,6 +143,9 @@ func main() {
 	router.GET("/api/sandbox/status", server.handleSandboxStatus)
 	router.GET("/api/services", server.handleServices)
 	router.GET("/api/ledger/onchain", server.handleOnchainLedger)
+	router.GET("/api/ledger/export", server.handleLedgerExport)
+	router.POST("/api/webhooks/register", publicGate, server.handleRegisterWebhook)
+	router.GET("/api/receipts/:taskId", server.handleReceipt)
 	router.GET("/api/jobs", server.handleGetJobs)
 	router.POST("/api/jobs", publicGate, server.handleCreateJob)
 	router.POST("/api/scenarios/run", publicGate, server.handleScenario)
@@ -221,18 +230,23 @@ func (s *Server) handleTelemetry(c *gin.Context) {
 		}
 	}
 
+	identity := os.Getenv("NEXUS_IDENTITY_REGISTRY_ADDRESS")
+	if identity == "" {
+		identity = os.Getenv("NEXUS_IDENTITY_ADDRESS")
+	}
 	c.JSON(http.StatusOK, types.TelemetryStats{
-		AgentAddress:   s.aevumClient.AgentAddress().Hex(),
-		Principal:      s.aevumClient.PrincipalAddress().Hex(),
-		EscrowContract: os.Getenv("NEXUS_ESCROW_ADDRESS"),
-		TotalJobs:      len(s.jobsHistory),
-		SettledJobs:    settled,
-		FailedJobs:     failed,
-		HourlySpent:    new(big.Int).Set(s.hourlySpent),
-		HourlyLimit:    s.hourlyLimit,
-		PerTaskLimit:   s.perTaskCap,
-		ChainID:        44005,
-		Network:        "QDay Aevum Testnet",
+		AgentAddress:     s.aevumClient.AgentAddress().Hex(),
+		Principal:        s.aevumClient.PrincipalAddress().Hex(),
+		EscrowContract:   os.Getenv("NEXUS_ESCROW_ADDRESS"),
+		IdentityRegistry: identity,
+		TotalJobs:        len(s.jobsHistory),
+		SettledJobs:      settled,
+		FailedJobs:       failed,
+		HourlySpent:      new(big.Int).Set(s.hourlySpent),
+		HourlyLimit:      s.hourlyLimit,
+		PerTaskLimit:     s.perTaskCap,
+		ChainID:          44005,
+		Network:          "QDay Aevum Testnet",
 	})
 }
 
@@ -266,6 +280,10 @@ func (s *Server) handleCreateJob(c *gin.Context) {
 	if service == "" {
 		service = req.TaskType
 	}
+	scheme := req.Scheme
+	if req.Evaluator && scheme == "" {
+		scheme = "auth-capture"
+	}
 	job := &types.TaskJob{
 		ID:        uuid.New().String(),
 		Prompt:    req.Prompt,
@@ -273,6 +291,8 @@ func (s *Server) handleCreateJob(c *gin.Context) {
 		Service:   service,
 		Status:    "PENDING",
 		CreatedAt: time.Now().UTC(),
+		Scheme:    scheme,
+		Evaluator: req.Evaluator || scheme == "auth-capture",
 	}
 
 	s.jobsMu.Lock()
@@ -419,6 +439,12 @@ func (s *Server) handleScenario(c *gin.Context) {
 	case "worker_timeout_refund":
 		job := s.queueJob("https://example.com", "web_brief", false, true)
 		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
+	case "voucher_burst":
+		go s.runVoucherBurst()
+		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "status": "running"})
+	case "evaluator_dispute_slash":
+		go s.runEvaluatorDispute()
+		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "status": "running"})
 	case "multi_hop_swarm":
 		workerURL, _ := s.directory.Endpoint("deep_due_diligence")
 		job := &types.TaskJob{
@@ -453,7 +479,7 @@ func (s *Server) handleScenario(c *gin.Context) {
 		s.enqueue(job)
 		c.JSON(http.StatusAccepted, gin.H{"scenario": body.Scenario, "job_id": job.ID})
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "scenario must be happy_path, velocity_attack, kill_switch_test, worker_timeout_refund, metered_batch, or multi_hop_swarm"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "scenario must be happy_path, velocity_attack, kill_switch_test, worker_timeout_refund, metered_batch, multi_hop_swarm, voucher_burst, or evaluator_dispute_slash"})
 	}
 }
 
@@ -463,6 +489,19 @@ func (s *Server) handleOnchainLedger(c *gin.Context) {
 		events = []aevum.ChainLedgerEntry{}
 	}
 	c.JSON(http.StatusOK, gin.H{"events": events})
+}
+
+func (s *Server) handleReceipt(c *gin.Context) {
+	taskID := strings.ToLower(strings.TrimSpace(c.Param("taskId")))
+	s.receiptMu.RLock()
+	doc, ok := s.receipts[taskID]
+	s.receiptMu.RUnlock()
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "receipt not found"})
+		return
+	}
+	c.Header("Content-Disposition", "inline")
+	c.JSON(http.StatusOK, doc)
 }
 
 func (s *Server) handleServices(c *gin.Context) {
@@ -479,6 +518,19 @@ func (s *Server) handleServices(c *gin.Context) {
 			continue
 		}
 		s.directory.SetReputation(worker.URL, completed, refunded, volume, bps, true)
+	}
+	if identity := os.Getenv("NEXUS_IDENTITY_ADDRESS"); common.IsHexAddress(identity) {
+		registry := common.HexToAddress(identity)
+		for _, worker := range s.directory.List() {
+			if !common.IsHexAddress(worker.Worker) {
+				continue
+			}
+			agentID, err := s.aevumClient.AgentPassport(ctx, registry, common.HexToAddress(worker.Worker))
+			if err != nil {
+				continue
+			}
+			s.directory.SetIdentity(worker.URL, agentID, registry.Hex())
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"workers": s.directory.List()})
 }
@@ -537,6 +589,45 @@ func (s *Server) runVelocity() {
 
 func (s *Server) publishJob(job *types.TaskJob) {
 	s.events.broadcast(job)
+	if s.webhooks != nil {
+		s.webhooks.Dispatch(job)
+	}
+}
+
+func (s *Server) handleRegisterWebhook(c *gin.Context) {
+	var body struct {
+		URL    string   `json:"url"`
+		Secret string   `json:"secret"`
+		Events []string `json:"events"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := s.webhooks.Register(body.URL, body.Secret, body.Events); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"registered": true, "events": body.Events})
+}
+
+func (s *Server) handleLedgerExport(c *gin.Context) {
+	format := c.DefaultQuery("format", "json")
+	rows := s.exportRows()
+	switch format {
+	case "json":
+		c.JSON(http.StatusOK, rows)
+	case "csv":
+		text, err := encodeCSV(rows)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.Header("Content-Disposition", "attachment; filename=nexus402-ledger.csv")
+		c.Data(http.StatusOK, "text/csv; charset=utf-8", []byte(text))
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "format must be csv or json"})
+	}
 }
 
 func (s *Server) handleEvents(c *gin.Context) {

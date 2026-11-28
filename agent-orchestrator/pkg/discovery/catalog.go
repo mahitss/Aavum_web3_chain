@@ -30,6 +30,8 @@ type Manifest struct {
 	TotalVolumeSettled string    `json:"totalVolumeSettled"`
 	ReliabilityBps     uint64    `json:"reliabilityBps"`
 	ReputationKnown    bool      `json:"reputationKnown"`
+	AgentID            uint64    `json:"agentId"`
+	IdentityAddress    string    `json:"identityAddress"`
 }
 
 type Directory struct {
@@ -91,6 +93,17 @@ func (d *Directory) SetReputation(url string, completed uint64, refunded uint64,
 			d.workers[index].TotalVolumeSettled = volume
 			d.workers[index].ReliabilityBps = bps
 			d.workers[index].ReputationKnown = known
+		}
+	}
+}
+
+func (d *Directory) SetIdentity(url string, agentID uint64, identity string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for index := range d.workers {
+		if d.workers[index].URL == url {
+			d.workers[index].AgentID = agentID
+			d.workers[index].IdentityAddress = identity
 		}
 	}
 }
